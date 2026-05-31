@@ -39,6 +39,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stale ones.
 
 ### Changed
+- `talk` reply reader now speaks only natural-language prose. It strips agent
+  machinery — tool calls (`Update(…)`, `Bash(…)`), their `⎿` results, diff/code
+  lines (line numbers, `+`/`-`), git hashes, paths, and command output — plus the
+  input box / prompt, paste placeholders, and your own echoed input (now matched
+  whitespace/case-insensitively so wrapped messages are caught). Watcher timing
+  tightened (poll 150 ms, settle 700 ms) for snappier read-back.
 - `talk` rewritten as a concurrent loop. A **persistent mic stream** opens once
   and stays live (steady indicator, no reopen lag), muted only during playback so
   Ava is never recorded back (the no-headphones echo fix). **Sending never blocks**

@@ -15,6 +15,43 @@ func TestReplyExtraction(t *testing.T) {
 	}
 }
 
+func TestFilterDropsMechanics(t *testing.T) {
+	// Real lines captured from a Claude Code pane: keep the prose, drop the
+	// tool calls, diffs, results, and command output.
+	lines := []string{
+		"Updating the CHANGELOG, then committing.",
+		"⏺ Update(CHANGELOG.md)",
+		"⎿  Added 8 lines",
+		"42 +- `talk` rewritten as a concurrent loop",
+		"39    stale ones.",
+		"Bash(export PATH=... && go build)",
+		"51348c1..74719ed  main -> main",
+		"❯ commit and push it", // input box (unsent) — must not be read
+		"That's great to hear.",
+	}
+	got := filterReply(lines, nil)
+	want := "Updating the CHANGELOG, then committing. That's great to hear."
+	if got != want {
+		t.Fatalf("filterReply = %q, want %q", got, want)
+	}
+}
+
+func TestFilterDropsWrappedEcho(t *testing.T) {
+	// A long input wraps across pane lines; the whole thing should still be
+	// recognized as the user's echo and not read back.
+	sent := []string{"Now I want to try a second test, write a test file and modify it."}
+	lines := []string{
+		"Now I want to try a second test, write a", // wrapped piece 1
+		"test file and modify it.",                 // wrapped piece 2
+		"Sure, I wrote and changed the file.",      // the actual reply
+	}
+	got := filterReply(lines, sent)
+	want := "Sure, I wrote and changed the file."
+	if got != want {
+		t.Fatalf("filterReply = %q, want %q", got, want)
+	}
+}
+
 func TestSanitizeForSpeech(t *testing.T) {
 	cases := map[string]string{
 		"⏺ Going great — and `talk` works! 🎙️": "Going great and talk works!",

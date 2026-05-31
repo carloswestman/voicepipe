@@ -230,9 +230,45 @@ func delta(baseline, cur string) []string {
 var (
 	// uiLine matches a line that is only box-drawing / separators / whitespace.
 	uiLine = regexp.MustCompile(`^[\s│─╭╮╰╯├┤┌┐└┘▌▏▕·•*=_\-—]+$`)
-	// statusLine matches spinner / status / token-count chrome.
-	statusLine = regexp.MustCompile(`(?i)(esc to interrupt|tokens?|ctrl\+|✻|✶|✻|⏵|⎿|◯|↑|↓|\b\d+s\b)`)
+	// statusLine matches spinner / status / token-count chrome and Claude Code's
+	// collapsed-paste placeholders.
+	statusLine = regexp.MustCompile(`(?i)(esc to interrupt|tokens?|ctrl\+|✻|✶|✻|⏵|⎿|◯|↑|↓|\b\d+s\b|pasted text|paste again to expand)`)
+
+	// The following identify agent *machinery* not to read aloud — tool calls,
+	// their results, and diff/code lines — so only natural-language prose is spoken.
+	toolCallLine = regexp.MustCompile(`^[\s●⏺○◯·•]*[A-Z][A-Za-z]+\(`) // "⏺ Update(file)", "Bash(…)"
+	resultLine   = regexp.MustCompile(`^\s*[⎿└├]`)                    // "⎿  Added 8 lines"
+	numberedLine = regexp.MustCompile(`^\s*\d+\s`)                    // diff/code "42 +…"
+	codeToken    = regexp.MustCompile(`\b[0-9a-f]{7,}\b|=>|::`)       // git hashes, code arrows
+	// promptLine: the input box / prompt (unsent text), e.g. "❯ commit and push".
+	promptLine = regexp.MustCompile(`^[\s│┃>]*[>❯›»]`)
 )
+
+// isMechanics reports whether a line is agent machinery (tool call, result,
+// diff/code line, or command output) rather than spoken prose.
+func isMechanics(s string) bool {
+	return toolCallLine.MatchString(s) ||
+		resultLine.MatchString(s) ||
+		numberedLine.MatchString(s) ||
+		codeToken.MatchString(s) ||
+		proseRatio(s) < 0.5 // paths, symbol-heavy output
+}
+
+// proseRatio is the fraction of letters and spaces — high for prose, low for
+// code, paths, hashes, and command output.
+func proseRatio(s string) float64 {
+	if s == "" {
+		return 1
+	}
+	var good, total int
+	for _, r := range s {
+		total++
+		if unicode.IsLetter(r) || unicode.IsSpace(r) {
+			good++
+		}
+	}
+	return float64(good) / float64(total)
+}
 
 // filterReply drops UI noise and any echoed input (sent — several messages may be
 // in flight), returning a single spoken line.
@@ -243,7 +279,10 @@ func filterReply(lines []string, sent []string) string {
 		if s == "" || uiLine.MatchString(s) || statusLine.MatchString(s) {
 			continue
 		}
-		if strings.HasPrefix(s, ">") { // input prompt line
+		if promptLine.MatchString(s) { // input box / prompt (unsent text)
+			continue
+		}
+		if isMechanics(s) { // tool calls, results, diffs, command output
 			continue
 		}
 		if matchesAny(s, sent) { // our own echoed input
@@ -255,13 +294,22 @@ func filterReply(lines []string, sent []string) string {
 }
 
 func matchesAny(line string, sent []string) bool {
+	nl := normalizeWS(line)
+	if nl == "" {
+		return false
+	}
 	for _, x := range sent {
-		x = strings.TrimSpace(x)
-		if x != "" && (strings.Contains(line, x) || strings.Contains(x, line)) {
+		// Normalize whitespace/case so wrapped or re-spaced echoes still match.
+		if nx := normalizeWS(x); nx != "" && (strings.Contains(nx, nl) || strings.Contains(nl, nx)) {
 			return true
 		}
 	}
 	return false
+}
+
+// normalizeWS lowercases and collapses runs of whitespace to single spaces.
+func normalizeWS(s string) string {
+	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
 }
 
 // sanitizeForSpeech strips characters that text-to-speech would awkwardly name —
