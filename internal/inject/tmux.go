@@ -45,6 +45,17 @@ func (s TmuxSink) Deliver(ctx context.Context, text string, submit bool) error {
 	return nil
 }
 
+// Submit presses Enter in the pane without sending new text — used by the
+// `talk` "send" command to submit/confirm.
+func (s TmuxSink) Submit(ctx context.Context) error {
+	args := []string{"send-keys"}
+	if s.Target != "" {
+		args = append(args, "-t", s.Target)
+	}
+	args = append(args, "Enter")
+	return tmuxRun(ctx, args...)
+}
+
 func tmuxRun(ctx context.Context, args ...string) error {
 	return exec.CommandContext(ctx, "tmux", args...).Run()
 }

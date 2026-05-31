@@ -9,19 +9,24 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/carloswestman/voicepipe/internal/audio"
+	"github.com/carloswestman/voicepipe/internal/command"
 	"github.com/carloswestman/voicepipe/internal/config"
 	"github.com/carloswestman/voicepipe/internal/inject"
 	"github.com/carloswestman/voicepipe/internal/speak"
 	"github.com/carloswestman/voicepipe/internal/tmuxpane"
 	"github.com/carloswestman/voicepipe/internal/transcribe"
+	"github.com/carloswestman/voicepipe/internal/ui"
 )
 
 const modelURL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"
@@ -48,6 +53,8 @@ func main() {
 		err = cmdInit(ctx)
 	case "panes":
 		err = cmdPanes(ctx)
+	case "agents":
+		err = cmdAgents(ctx)
 	case "devices":
 		err = cmdDevices()
 	case "doctor":
@@ -63,14 +70,14 @@ func main() {
 		os.Exit(1)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		fmt.Fprintln(os.Stderr, ui.Red("error:"), err)
 		os.Exit(1)
 	}
 }
 
 func usage() {
-	fmt.Print(`voicepipe — stream voice to text into your terminal
-
+	fmt.Println(ui.Bold("voicepipe") + ui.Dim(" — stream voice to text into your terminal"))
+	fmt.Print(`
 usage:
   voicepipe init                 download the whisper model and write config
   voicepipe capture              record one utterance, type it into the focused window
@@ -84,14 +91,16 @@ usage:
   voicepipe talk [--pane P]      two-way: speak to an agent (pane P, default active),
                                  hear its reply read aloud (--voice NAME, --rate WPM)
                                  (--pane and --target are aliases; P from "voicepipe panes")
+                                 in-session voice commands: say "computer help" (connect,
+                                 agents, status, pause, resume, send, quit; word configurable)
   voicepipe type <text>          type given text via the keystroke sink (test typing)
   voicepipe panes                list tmux panes (find a --target for talk)
+  voicepipe agents               list configured agents and whether each is alive
   voicepipe devices              list microphone input devices
   voicepipe doctor               check that whisper-cpp, the model, and sinks are ready
   voicepipe tmux-install         print the tmux binding for power-mode routing
-
-config: ` + config.Path() + `
 `)
+	fmt.Println("\n" + ui.Dim("config: "+config.Path()))
 }
 
 // sinkFromFlags builds the delivery sink and submit flag from config defaults,
@@ -304,10 +313,86 @@ func cmdTalk(ctx context.Context, args []string) error {
 		fmt.Fprintf(os.Stderr, "voicepipe: warning — target %s is this pane (voicepipe's own); you likely want a different agent. See `voicepipe panes`.\n", target)
 	}
 
-	sink := inject.TmuxSink{Target: target}
+	agentLabel := tmuxpane.WindowOf(ctx, target) // name shown on replies; updated by connect
 	sopts := speak.Options{Voice: voice, Rate: rate}
+	wake := cfg.CommandWord
+	// Bias whisper toward the wake word, command verbs, and agent names so spoken
+	// commands like "computer panes" and "connect to agent two" transcribe right.
+	cfg.Prompt = talkPrompt(cfg)
+	say := func(s string) { _ = speak.Say(ctx, s, sopts) }
 
-	fmt.Fprintf(os.Stderr, "voicepipe: talking with pane %s — speak, pause to send; replies read aloud. Ctrl-C to stop.\n", target)
+	// Esc-to-stop: while a reply is being read aloud, pressing Esc in this pane
+	// kills playback. Active only when stdin is a terminal (cbreak succeeds).
+	var (
+		sayMu     sync.Mutex
+		activeSay *exec.Cmd
+	)
+	setSay := func(c *exec.Cmd) { sayMu.Lock(); activeSay = c; sayMu.Unlock() }
+	stopSay := func() {
+		sayMu.Lock()
+		if activeSay != nil && activeSay.Process != nil {
+			_ = activeSay.Process.Kill()
+		}
+		sayMu.Unlock()
+	}
+	escStop := false
+	if restore, ok := enterCbreak(); ok {
+		defer restore()
+		escStop = true
+		go func() {
+			buf := make([]byte, 1)
+			for {
+				n, err := os.Stdin.Read(buf)
+				if err != nil {
+					return
+				}
+				if n > 0 && buf[0] == 0x1b { // Esc
+					stopSay()
+				}
+			}
+		}()
+	}
+	// speakReply reads a reply aloud, interruptible by Esc.
+	speakReply := func(reply string) {
+		c := speak.Command(ctx, reply, sopts)
+		setSay(c)
+		_ = c.Run()
+		setSay(nil)
+	}
+
+	// sendContent delivers one message to the connected pane and speaks the reply.
+	sendContent := func(text string) {
+		baseline, err := tmuxpane.Capture(ctx, target)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "voicepipe: capture:", err)
+			return
+		}
+		if err := (inject.TmuxSink{Target: target}).Deliver(ctx, text, true); err != nil {
+			fmt.Fprintln(os.Stderr, "voicepipe: deliver:", err)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "  %s %s\n", ui.Accent("→"), text)
+		reply, err := tmuxpane.WaitForReply(ctx, target, baseline, text)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "voicepipe: reply:", err)
+			return
+		}
+		if reply == "" {
+			if verbose {
+				fmt.Fprintln(os.Stderr, "[reply]   (nothing new to read)")
+			}
+			return
+		}
+		fmt.Fprintf(os.Stderr, "  %s %s %s\n", ui.Green("←"), ui.Green(agentLabel+":"), reply)
+		speakReply(reply)
+	}
+
+	talkBanner(tmuxpane.WindowOf(ctx, target)+ui.Dim(" · ")+target, wake, cfg.Agents)
+	if escStop {
+		fmt.Fprintln(os.Stderr, "  "+ui.Dim("press Esc to stop a reply mid-playback"))
+	}
+	paused := false
+
 	for ctx.Err() == nil {
 		text, err := recordOnce(ctx, cfg, verbose)
 		if err != nil {
@@ -321,39 +406,187 @@ func cmdTalk(ctx context.Context, args []string) error {
 			continue
 		}
 
-		// Baseline the pane before sending so the reply diff excludes prior output.
-		baseline, err := tmuxpane.Capture(ctx, target)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "voicepipe: capture:", err)
+		cmd := command.Parse(text, wake)
+		if !cmd.IsCommand {
+			if paused {
+				if verbose {
+					fmt.Fprintf(os.Stderr, "  (paused — say \"%s resume\") ignored: %s\n", wake, text)
+				}
+				continue
+			}
+			sendContent(text)
 			continue
 		}
-		if err := sink.Deliver(ctx, text, true); err != nil {
-			fmt.Fprintln(os.Stderr, "voicepipe: deliver:", err)
-			continue
-		}
-		fmt.Fprintf(os.Stderr, "  → %s\n", text)
 
-		reply, err := tmuxpane.WaitForReply(ctx, target, baseline, text)
-		if err != nil {
-			if ctx.Err() != nil {
-				break
+		switch cmd.Verb {
+		case "pause":
+			paused = true
+			fmt.Fprintf(os.Stderr, "  %s %s\n", ui.Yellow("⏸"), ui.Dim("paused — say \""+wake+" resume\" to continue"))
+			say("Paused.")
+		case "resume":
+			paused = false
+			fmt.Fprintf(os.Stderr, "  %s %s\n", ui.Green("▶"), ui.Dim("resumed"))
+			say("Resumed.")
+		case "connect":
+			id, label, ok, e := resolveAgent(ctx, cfg.Agents, cmd.Arg)
+			if e != nil {
+				fmt.Fprintln(os.Stderr, "voicepipe: connect:", e)
+				continue
 			}
-			fmt.Fprintln(os.Stderr, "voicepipe: reply:", err)
-			continue
-		}
-		if reply == "" {
-			if verbose {
-				fmt.Fprintln(os.Stderr, "[reply]   (nothing new to read)")
+			if !ok {
+				fmt.Fprintf(os.Stderr, "  %s\n", ui.Yellow("no agent matching \""+cmd.Arg+"\""))
+				say("No agent matching " + cmd.Arg)
+				continue
 			}
-			continue
-		}
-		fmt.Fprintf(os.Stderr, "  ◀ %s\n", reply)
-		if err := speak.Say(ctx, reply, sopts); err != nil && ctx.Err() == nil {
-			fmt.Fprintln(os.Stderr, "voicepipe: say:", err)
+			target = id
+			agentLabel = label
+			fmt.Fprintf(os.Stderr, "  %s connected to %s %s\n", ui.Accent("⇄"), ui.Accent(label), ui.Dim("· "+id))
+			say("Connected to " + label)
+		case "panes":
+			listAgentsAloud(ctx, cfg.Agents, say)
+		case "status":
+			win := tmuxpane.WindowOf(ctx, target)
+			fmt.Fprintf(os.Stderr, "  %s connected to %s %s\n", ui.Accent("⇄"), ui.Accent(win), ui.Dim("· "+target))
+			say("Connected to " + win)
+		case "send":
+			if err := (inject.TmuxSink{Target: target}).Submit(ctx); err != nil {
+				fmt.Fprintln(os.Stderr, "voicepipe: send:", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "  %s %s\n", ui.Dim("⏎"), ui.Dim("sent"))
+			}
+		case "help":
+			printCommandHelp(wake)
+			say("Commands: connect, agents, status, pause, resume, send, help, and quit.")
+		case "quit":
+			say("Goodbye.")
+			fmt.Fprintln(os.Stderr, "\nvoicepipe: stopped.")
+			return nil
+		default:
+			fmt.Fprintf(os.Stderr, "  unknown command %q — say \"%s help\"\n", cmd.Verb, wake)
+			say("Unknown command. Say " + wake + " help.")
 		}
 	}
 	fmt.Fprintln(os.Stderr, "\nvoicepipe: stopped.")
 	return nil
+}
+
+// resolveAgent maps a spoken name to a pane id: registry first, then a tmux
+// window-name search. label is the friendly/window name for feedback.
+func resolveAgent(ctx context.Context, agents map[string]string, name string) (id, label string, ok bool, err error) {
+	key := normalizeName(name)
+	if key == "" {
+		return "", "", false, nil
+	}
+	for k, target := range agents {
+		if normalizeName(k) == key { // number-aware: "agent two" == "agent 2"
+			if id, err = tmuxpane.ResolvePane(ctx, target); err != nil {
+				return "", "", false, err
+			}
+			return id, k, true, nil
+		}
+	}
+	pane, found, err := tmuxpane.FindByName(ctx, name)
+	if err != nil {
+		return "", "", false, err
+	}
+	if found {
+		return pane.ID, pane.Window(), true, nil
+	}
+	return "", "", false, nil
+}
+
+func talkBanner(connected, wake string, agents map[string]string) {
+	label := func(s string) string { return ui.Dim(fmt.Sprintf("%-10s", s)) }
+	fmt.Fprintln(os.Stderr, ui.Bold("voicepipe")+ui.Dim(" · talk"))
+	fmt.Fprintf(os.Stderr, "  %s%s\n", label("connected"), ui.Accent(connected))
+	if len(agents) > 0 {
+		fmt.Fprintf(os.Stderr, "  %s%s\n", label("agents"), strings.Join(sortedKeys(agents), ui.Dim("  ")))
+	}
+	fmt.Fprintf(os.Stderr, "  %s%s  %s  %s\n", label("commands"),
+		ui.Dim("say"), "\""+wake+" help\"", ui.Dim("· Ctrl-C to quit"))
+	fmt.Fprintln(os.Stderr, "  "+ui.Dim("speak to message the connected agent; replies are read aloud."))
+}
+
+func printCommandHelp(wake string) {
+	fmt.Fprintf(os.Stderr, "  %s %s\n", ui.Accent("?"), ui.Bold("commands")+ui.Dim(" · say \""+wake+"\" first"))
+	for _, c := range [][2]string{
+		{"connect <agent>", "switch which agent you talk to"},
+		{"agents", "list your agents"},
+		{"status", "say which agent you're connected to"},
+		{"pause", "stop sending your speech (still hears commands)"},
+		{"resume", "start sending again"},
+		{"send", "press Enter in the agent's pane"},
+		{"help", "show this list"},
+		{"quit", "exit talk"},
+	} {
+		fmt.Fprintf(os.Stderr, "    %s %-16s %s\n", ui.Dim("·"), c[0], ui.Dim(c[1]))
+	}
+}
+
+func listAgentsAloud(ctx context.Context, agents map[string]string, say func(string)) {
+	if len(agents) > 0 {
+		names := sortedKeys(agents)
+		for _, n := range names {
+			fmt.Fprintf(os.Stderr, "  %s → %s\n", n, agents[n])
+		}
+		say("Agents: " + strings.Join(names, ", "))
+		return
+	}
+	// No registry: fall back to listing tmux windows.
+	panes, err := tmuxpane.ListPanes(ctx)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "voicepipe: panes:", err)
+		return
+	}
+	var windows []string
+	seen := map[string]bool{}
+	for _, p := range panes {
+		w := p.Window()
+		fmt.Fprintf(os.Stderr, "  %-5s %s\n", p.ID, p.Location)
+		if !seen[w] {
+			seen[w] = true
+			windows = append(windows, w)
+		}
+	}
+	say("Windows: " + strings.Join(windows, ", "))
+}
+
+// talkPrompt augments the whisper prompt with the command vocabulary and agent
+// names so spoken commands are recognized reliably.
+func talkPrompt(cfg config.Config) string {
+	parts := []string{cfg.Prompt}
+	parts = append(parts, "Voice commands: "+cfg.CommandWord+
+		" connect, agents, status, pause, resume, send, help, quit.")
+	if len(cfg.Agents) > 0 {
+		parts = append(parts, "Agents: "+strings.Join(sortedKeys(cfg.Agents), ", ")+".")
+	}
+	return strings.TrimSpace(strings.Join(parts, " "))
+}
+
+var numberWords = map[string]string{
+	"zero": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+	"six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
+}
+
+// normalizeName lowercases a spoken/registry name and converts number words to
+// digits so "agent two" and "agent 2" match the same agent (whisper varies).
+func normalizeName(s string) string {
+	fields := strings.Fields(strings.ToLower(strings.TrimSpace(s)))
+	for i, f := range fields {
+		if d, ok := numberWords[f]; ok {
+			fields[i] = d
+		}
+	}
+	return strings.Join(fields, " ")
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // cmdType types its argument via the keystroke sink — a quick way to test typing
@@ -374,16 +607,16 @@ func cmdInit(ctx context.Context) error {
 	if err := cfg.Save(); err != nil {
 		return err
 	}
-	fmt.Println("wrote config:", config.Path())
+	fmt.Println(ui.Green("✓") + " wrote config " + ui.Dim(config.Path()))
 
 	if _, err := os.Stat(cfg.ModelPath); err == nil {
-		fmt.Println("model already present:", cfg.ModelPath)
+		fmt.Println(ui.Green("✓") + " model present " + ui.Dim(cfg.ModelPath))
 		return nil
 	}
 	if err := os.MkdirAll(config.ModelDir(), 0o755); err != nil {
 		return err
 	}
-	fmt.Println("downloading model (~1.5 GB) to", cfg.ModelPath)
+	fmt.Println(ui.Dim("downloading model (~1.5 GB) to " + cfg.ModelPath))
 	return download(ctx, modelURL, cfg.ModelPath)
 }
 
@@ -425,13 +658,38 @@ func cmdPanes(ctx context.Context) error {
 		fmt.Println("no tmux panes found")
 		return nil
 	}
-	fmt.Println("tmux panes (pass the id or location to --target):")
+	fmt.Println(ui.Bold("tmux panes") + ui.Dim(" · pass the id or location to --target"))
 	for _, p := range panes {
 		active := ""
 		if p.Active {
-			active = "  (active)"
+			active = "  " + ui.Green("●")
 		}
-		fmt.Printf("  %-5s  %-28s  [%s]%s\n", p.ID, p.Location, p.Command, active)
+		fmt.Printf("  %s  %-28s  %s%s\n", ui.Accent(fmt.Sprintf("%-5s", p.ID)), p.Location, ui.Dim("["+p.Command+"]"), active)
+	}
+	return nil
+}
+
+// cmdAgents lists the configured agent registry and checks whether each target
+// still resolves to a live tmux pane (catches stale mappings).
+func cmdAgents(ctx context.Context) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if len(cfg.Agents) == 0 {
+		fmt.Println("no agents configured.")
+		fmt.Println("add them under \"agents\" in", config.Path())
+		fmt.Println("find targets with `voicepipe panes`.")
+		return nil
+	}
+	fmt.Println(ui.Bold("agents") + ui.Dim(" · say \""+cfg.CommandWord+" connect to <name>\""))
+	for _, name := range sortedKeys(cfg.Agents) {
+		target := cfg.Agents[name]
+		if id, e := tmuxpane.ResolvePane(ctx, target); e != nil {
+			fmt.Printf("  %s %-14s %s\n", ui.Red("●"), name, ui.Dim("→ "+target+"  (not found)"))
+		} else {
+			fmt.Printf("  %s %-14s %s\n", ui.Green("●"), name, ui.Dim("→ "+id+"  ("+tmuxpane.WindowOf(ctx, id)+")"))
+		}
 	}
 	return nil
 }
@@ -441,32 +699,33 @@ func cmdDevices() error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("input devices:")
+	fmt.Println(ui.Bold("input devices"))
 	for _, n := range names {
-		fmt.Println("  -", n)
+		fmt.Println("  "+ui.Dim("·"), n)
 	}
-	fmt.Println("\nset the one you want with the input_device field in", config.Path())
+	fmt.Println("\n" + ui.Dim("set the input_device field in "+config.Path()))
 	return nil
 }
 
 func cmdDoctor() error {
 	cfg, _ := config.Load()
 	ok := true
+	fmt.Println(ui.Bold("doctor"))
 	required := func(label string, good bool, hint string) {
-		mark := "ok"
+		dot := ui.Green("●")
 		if !good {
-			mark = "MISSING"
+			dot = ui.Red("●")
 			ok = false
 		}
-		fmt.Printf("  [%s] %s\n", mark, label)
+		fmt.Printf("  %s %s\n", dot, label)
 		if !good && hint != "" {
-			fmt.Println("        →", hint)
+			fmt.Println("    " + ui.Dim("→ "+hint))
 		}
 	}
 	info := func(label, note string) {
-		fmt.Printf("  [info] %s\n", label)
+		fmt.Printf("  %s %s\n", ui.Dim("○"), label)
 		if note != "" {
-			fmt.Println("        →", note)
+			fmt.Println("    " + ui.Dim("→ "+note))
 		}
 	}
 
@@ -476,7 +735,7 @@ func cmdDoctor() error {
 	required("model present", modelErr == nil, "voicepipe init")
 
 	// Sink-specific guidance.
-	fmt.Printf("\nsink: %s\n", cfg.Sink)
+	fmt.Printf("\n%s %s\n", ui.Dim("sink"), ui.Accent(cfg.Sink))
 	switch cfg.Sink {
 	case inject.KindTmux:
 		required("tmux on PATH", onPath("tmux"), "brew install tmux")
@@ -495,7 +754,7 @@ func cmdDoctor() error {
 	if !ok {
 		return fmt.Errorf("doctor found problems")
 	}
-	fmt.Println("\nall good — try `voicepipe capture --send`")
+	fmt.Println("\n" + ui.Green("✓ all good") + ui.Dim(" — try voicepipe capture --send"))
 	return nil
 }
 

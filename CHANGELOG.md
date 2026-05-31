@@ -12,6 +12,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   symbols/markers/emoji so speech stays clean. Options: `--pane`/`--target`,
   `--voice`, `--rate`. Config: `voice`, `speech_rate`.
 - `panes` — list all tmux panes (id, location, command) to find a `talk` target.
+- `agents` — list the configured agent registry and check each target still
+  resolves to a live tmux pane (catches stale mappings).
+- In-session voice commands for `talk`: a configurable wake word (`command_word`,
+  default "computer") marks a command; everything else is sent to the connected
+  agent. Commands: connect/switch to a named agent (sticky), panes, status,
+  pause, resume, send, help, quit. `talk` prints the command banner on start.
+- Agent registry (`agents` in config): map friendly names to tmux targets so you
+  can say "computer connect to backend". voicepipe stays tool-agnostic — anything
+  that accepts natural language. Falls back to tmux window-name matching.
+
+- Esc-to-stop in `talk`: press Esc in the voicepipe pane to kill a reply that's
+  being read aloud (emergency brake for long replies). Uses cbreak terminal mode
+  while keeping Ctrl-C and output intact; auto-disabled when stdin isn't a TTY.
+- Minimal terminal styling (`internal/ui`): bold/dim/accent and status colors
+  across `talk`, `agents`, `panes`, `devices`, `doctor`, `init`, and errors.
+  Auto-disables when output isn't a TTY or `NO_COLOR` is set — no dependencies.
+- `talk` conversation view: cyan `→` for your message, green `←` with the agent's
+  name for each reply, `⇄` for the connection — a consistent icon set.
 
 ### Changed
 - `talk` validates its target pane, accepts `--pane` (alias of `--target`) and a

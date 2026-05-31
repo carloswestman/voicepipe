@@ -32,6 +32,58 @@ func ListPanes(ctx context.Context) ([]Pane, error) {
 	return parsePanes(string(out)), nil
 }
 
+// Window returns the window-name portion of a pane's location
+// ("dev:reporting.1" → "reporting").
+func (p Pane) Window() string {
+	loc := p.Location
+	if i := strings.IndexByte(loc, ':'); i >= 0 {
+		loc = loc[i+1:]
+	}
+	if j := strings.LastIndexByte(loc, '.'); j >= 0 {
+		loc = loc[:j]
+	}
+	return loc
+}
+
+// FindByName returns the first pane whose window name matches the spoken name
+// (exact match preferred, then substring either way). Used as the fallback when
+// no agent registry is configured.
+func FindByName(ctx context.Context, name string) (Pane, bool, error) {
+	panes, err := ListPanes(ctx)
+	if err != nil {
+		return Pane{}, false, err
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return Pane{}, false, nil
+	}
+	for _, p := range panes {
+		if strings.ToLower(p.Window()) == name {
+			return p, true, nil
+		}
+	}
+	for _, p := range panes {
+		w := strings.ToLower(p.Window())
+		if strings.Contains(w, name) || strings.Contains(name, w) {
+			return p, true, nil
+		}
+	}
+	return Pane{}, false, nil
+}
+
+// WindowOf returns the window name for a target spec, or the target itself if it
+// can't be resolved.
+func WindowOf(ctx context.Context, target string) string {
+	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", target, "#{window_name}").Output()
+	if err != nil {
+		return target
+	}
+	if w := strings.TrimSpace(string(out)); w != "" {
+		return w
+	}
+	return target
+}
+
 func parsePanes(out string) []Pane {
 	var panes []Pane
 	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {

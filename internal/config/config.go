@@ -60,6 +60,17 @@ type Config struct {
 
 	// SpeechRate is the words-per-minute for spoken replies (0 = system default).
 	SpeechRate int `json:"speech_rate"`
+
+	// CommandWord is the spoken prefix that marks a voicepipe command in `talk`
+	// (e.g. "computer connect backend"). Everything not starting with it is sent
+	// to the connected agent. Use a single, distinct word.
+	CommandWord string `json:"command_word"`
+
+	// Agents maps a friendly name (used by voice: "<word> connect to <name>") to a
+	// tmux target (pane id like "%3", or "session:window.pane"). voicepipe is
+	// agnostic about what runs there — anything that takes natural language. When
+	// empty, `connect` falls back to matching the spoken name to a tmux window.
+	Agents map[string]string `json:"agents"`
 }
 
 // Default returns the recommended out-of-the-box configuration.
@@ -74,6 +85,8 @@ func Default() Config {
 		Language:    "en",
 		Prompt:      "Talking to Claude Code in tmux with neovim. Terms: Claude Code, tmux, neovim, voicepipe, Anthropic, Opus, Sonnet.",
 		Sink:        "keystroke", // works everywhere; tmux is opt-in via --target
+		CommandWord: "computer",
+		Agents:      map[string]string{},
 	}
 }
 
