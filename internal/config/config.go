@@ -15,8 +15,10 @@ import (
 // few — every extra knob is friction for new users.
 type Config struct {
 	// InputDevice is a case-insensitive substring matched against capture device
-	// names. Empty means "system default". On Bluetooth headsets the default mic
-	// forces macOS into low-quality HFP, so we default to the built-in mic.
+	// names. Empty (the default) follows the macOS default input — switch mics in
+	// the Mac sound controls and voicepipe uses whatever's selected. Note: using a
+	// Bluetooth headset's mic forces macOS into low-quality HFP; set a specific
+	// substring (e.g. "MacBook") to pin the built-in mic and keep full quality.
 	InputDevice string `json:"input_device"`
 
 	// ModelPath points at a whisper.cpp GGML model (e.g. large-v3-turbo).
@@ -80,7 +82,7 @@ type Config struct {
 // Default returns the recommended out-of-the-box configuration.
 func Default() Config {
 	return Config{
-		InputDevice: "MacBook", // prefer built-in mic over HFP Bluetooth
+		InputDevice: "", // follow the macOS default input device
 		ModelPath:   filepath.Join(dataDir(), "models", "ggml-large-v3-turbo.bin"),
 		WhisperBin:  "whisper-cli",
 		SendEnter:   false,

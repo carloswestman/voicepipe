@@ -39,6 +39,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stale ones.
 
 ### Changed
+- `input_device` now defaults to empty, which **follows the macOS default input**
+  — switch mics in the Mac sound controls and voicepipe uses what's selected
+  (output already follows the default output). Set a substring (e.g. "MacBook")
+  to pin a specific mic and avoid a Bluetooth headset's low-quality HFP mode.
 - `talk` reply reader now speaks only natural-language prose. It strips agent
   machinery — tool calls (`Update(…)`, `Bash(…)`), their `⎿` results, diff/code
   lines (line numbers, `+`/`-`), git hashes, paths, and command output — plus the

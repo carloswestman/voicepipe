@@ -71,12 +71,14 @@ the pane you fired from. (This is the one thing keystroke mode can't do: reach a
 
 ## Microphone note (Sony WH-1000XM5 and other Bluetooth headsets)
 
-Using a Bluetooth headset's **microphone** forces macOS into the low-quality HFP
-profile, which both degrades your music output and hurts transcription accuracy.
-voicepipe therefore defaults `input_device` to `MacBook` (the built-in mic),
-which stays high quality while you keep the headset for listening. Run
-`voicepipe devices` to see options and change `input_device` in the config if you
-prefer the headset mic.
+By default `input_device` is empty, so voicepipe **follows the macOS default
+input** — pick your mic in the Mac sound controls and voicepipe uses it (Ava's
+output already follows the default output device too).
+
+One caveat: using a Bluetooth headset's **microphone** forces macOS into the
+low-quality HFP profile, which degrades both that mic *and* your audio output. If
+you wear the headset to listen but want full quality, pin the built-in mic by
+setting `input_device` to `"MacBook"`. Run `voicepipe devices` to see options.
 
 ## Configuration
 
@@ -85,7 +87,7 @@ Config lives at `~/Library/Application Support/voicepipe/config.json` on macOS
 
 | field          | default                       | meaning                                  |
 |----------------|-------------------------------|------------------------------------------|
-| `input_device` | `MacBook`                     | mic name substring (empty = system default) |
+| `input_device` | `""` (system default)         | mic name substring; empty follows the macOS default input |
 | `model_path`   | `…/ggml-large-v3-turbo.bin`   | whisper.cpp GGML model                   |
 | `whisper_bin`  | `whisper-cli`                 | whisper.cpp CLI to run                    |
 | `send_enter`   | `false`                       | submit after injecting                    |
