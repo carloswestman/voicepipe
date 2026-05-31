@@ -481,12 +481,35 @@ func cmdTalk(ctx context.Context, args []string) error {
 		}
 	}
 
-	// Reply watcher: reads each new settled reply from the connected agent aloud,
-	// independently of sending — so you can keep talking while the agent works.
+	// Reply watcher: streams the agent's prose blocks aloud as they complete. A
+	// block (split on the ⏺ marker) is finished the instant a later block starts,
+	// so the intro speaks the moment the agent moves to a tool — no waiting for the
+	// whole turn. The final block waits for the screen to settle.
 	go func() {
 		const poll = 150 * time.Millisecond
 		const settle = 700 * time.Millisecond
-		var prevVisible, consumedFull string
+		spoken := map[string]bool{}
+		var order []string
+		markSpoken := func(p string) {
+			if !spoken[p] {
+				spoken[p] = true
+				order = append(order, p)
+				if len(order) > 200 { // bound the memory
+					delete(spoken, order[0])
+					order = order[1:]
+				}
+			}
+		}
+		// markAll marks every current prose block read — used on connect and Esc so
+		// we don't replay history or a backlog.
+		markAll := func(t string) {
+			for _, b := range tmuxpane.Blocks(tmuxpane.CaptureFull(cctx, t)) {
+				if p := tmuxpane.CleanBlock(b, getSent()); p != "" {
+					markSpoken(p)
+				}
+			}
+		}
+		var prevVisible string
 		var lastChange time.Time
 		for {
 			select {
@@ -499,70 +522,44 @@ func cmdTalk(ctx context.Context, args []string) error {
 				setState("listening")
 				continue
 			}
-			if skipRead.Swap(false) { // Esc pressed: fast-forward past the backlog
+			if skipRead.Swap(false) || takeRebaseline() {
+				markAll(t)
 				prevVisible, _ = tmuxpane.Capture(cctx, t)
-				consumedFull = tmuxpane.CaptureFull(cctx, t)
 				lastChange = time.Now()
 				setState("listening")
 				continue
 			}
-			if takeRebaseline() {
-				prevVisible, _ = tmuxpane.Capture(cctx, t)
-				consumedFull = tmuxpane.CaptureFull(cctx, t)
-				lastChange = time.Now()
-				setState("listening")
-				continue
-			}
-			// Change + "working" are judged on the VISIBLE screen (the live area),
-			// so old "esc to interrupt" lines in scrollback don't read as busy.
+			// Track screen stability on the visible area; "working" = live spinner.
 			visible, _ := tmuxpane.Capture(cctx, t)
 			if visible != prevVisible {
-				if verbose {
-					fmt.Fprintf(os.Stderr, "[watch] changed → thinking | tail: %q\n", lastLine(visible))
-				}
 				prevVisible = visible
 				lastChange = time.Now()
+			}
+			working := tmuxpane.Working(visible)
+			settled := !working && time.Since(lastChange) >= settle
+
+			blocks := tmuxpane.Blocks(tmuxpane.CaptureFull(cctx, t))
+			for i, b := range blocks {
+				prose := tmuxpane.CleanBlock(b, getSent())
+				if prose == "" || spoken[prose] {
+					continue // machinery, or already read
+				}
+				if i == len(blocks)-1 && !settled {
+					break // final block is still streaming — wait for it
+				}
+				markSpoken(prose)
+				if verbose {
+					fmt.Fprintf(os.Stderr, "[watch] reading block (%d chars)\n", len(prose))
+				}
+				printLine("  " + ui.Green("←") + " " + ui.Green(label+":") + " " + prose)
+				setState("speaking")
+				say(prose)
+			}
+			if working {
 				setState("thinking")
-				continue
-			}
-			if tmuxpane.Working(visible) {
-				if verbose {
-					fmt.Fprintln(os.Stderr, "[watch] working indicator → thinking")
-				}
-				setState("thinking")
-				continue
-			}
-			if time.Since(lastChange) < settle {
-				if verbose {
-					fmt.Fprintln(os.Stderr, "[watch] stable, settling…")
-				}
-				continue // wait for the screen to settle
-			}
-			// Settled: extract the reply from the full (scrollback) capture.
-			full := tmuxpane.CaptureFull(cctx, t)
-			if full == consumedFull {
-				if verbose {
-					fmt.Fprintln(os.Stderr, "[watch] settled, no new content → listening")
-				}
+			} else {
 				setState("listening")
-				continue
 			}
-			reply := tmuxpane.NewReply(consumedFull, full, getSent())
-			consumedFull = full
-			if reply == "" {
-				if verbose {
-					fmt.Fprintln(os.Stderr, "[watch] settled, new content filtered to empty → listening")
-				}
-				setState("listening")
-				continue
-			}
-			if verbose {
-				fmt.Fprintf(os.Stderr, "[watch] reading reply (%d chars)\n", len(reply))
-			}
-			printLine("  " + ui.Green("←") + " " + ui.Green(label+":") + " " + reply)
-			setState("speaking")
-			say(reply)
-			setState("listening")
 		}
 	}()
 
@@ -671,27 +668,6 @@ func cmdTalk(ctx context.Context, args []string) error {
 			say("Unknown command. Say " + wake + " help.")
 		}
 	}
-}
-
-// lastLine returns the last non-empty line of s (trimmed, capped), for debug logs.
-func lastLine(s string) string {
-	for _, l := range reverseLines(s) {
-		if t := strings.TrimSpace(l); t != "" {
-			if len(t) > 70 {
-				t = t[:70]
-			}
-			return t
-		}
-	}
-	return ""
-}
-
-func reverseLines(s string) []string {
-	lines := strings.Split(s, "\n")
-	for i, j := 0, len(lines)-1; i < j; i, j = i+1, j-1 {
-		lines[i], lines[j] = lines[j], lines[i]
-	}
-	return lines
 }
 
 // transcribeSamples writes the utterance to a temp WAV and transcribes it.

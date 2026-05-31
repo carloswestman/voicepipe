@@ -39,6 +39,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stale ones.
 
 ### Changed
+- `talk` reply reader is now **incremental / streaming**. It splits the agent's
+  output into `⏺`-delimited blocks and speaks each prose block the instant a later
+  block begins (the final block once the screen settles) — so in a multi-step turn
+  the intro is read aloud while tools run, instead of waiting for the whole turn.
+  Tool blocks are skipped; already-read blocks aren't repeated; Esc clears the
+  backlog.
 - `input_device` now defaults to empty, which **follows the macOS default input**
   — switch mics in the Mac sound controls and voicepipe uses what's selected
   (output already follows the default output). Set a substring (e.g. "MacBook")

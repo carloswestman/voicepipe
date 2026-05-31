@@ -1,6 +1,9 @@
 package tmuxpane
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestReplyExtraction(t *testing.T) {
 	baseline := "> hello\n\n│ old reply │\n"
@@ -49,6 +52,32 @@ func TestFilterDropsWrappedEcho(t *testing.T) {
 	want := "Sure, I wrote and changed the file."
 	if got != want {
 		t.Fatalf("filterReply = %q, want %q", got, want)
+	}
+}
+
+func TestBlocksAndCleanBlock(t *testing.T) {
+	capture := strings.Join([]string{
+		"❯ Shut up, it is so sturdy.",
+		"",
+		"⏺ On it, committing the change first.",
+		"",
+		"⏺ Update(CHANGELOG.md)",
+		"  ⎿  Added 8 lines",
+		"   42 +- talk rewritten",
+		"⏺ Pushed, it is live now.",
+	}, "\n")
+	blocks := Blocks(capture)
+	if len(blocks) != 3 { // intro prose, Update tool, Pushed prose
+		t.Fatalf("got %d blocks, want 3", len(blocks))
+	}
+	if got := CleanBlock(blocks[0], nil); got != "On it, committing the change first." {
+		t.Errorf("block 0 = %q", got)
+	}
+	if got := CleanBlock(blocks[1], nil); got != "" { // tool block → nothing spoken
+		t.Errorf("block 1 (tool) = %q, want empty", got)
+	}
+	if got := CleanBlock(blocks[2], nil); got != "Pushed, it is live now." {
+		t.Errorf("block 2 = %q", got)
 	}
 }
 

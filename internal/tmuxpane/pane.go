@@ -164,6 +164,43 @@ func NewReply(prev, cur string, sent []string) string {
 	return filterReply(delta(prev, cur), sent)
 }
 
+// Blocks splits a pane capture into the agent's ⏺-delimited blocks (each a prose
+// paragraph or a tool call), in order. Non-assistant lines — the user prompt ❯,
+// status ✻, and UI ● — end the current block. This drives streaming reads: a
+// block is complete the moment a later block has started.
+func Blocks(capture string) [][]string {
+	var blocks [][]string
+	var cur []string
+	flush := func() {
+		if len(cur) > 0 {
+			blocks = append(blocks, cur)
+		}
+		cur = nil
+	}
+	for _, l := range strings.Split(capture, "\n") {
+		t := strings.TrimSpace(l)
+		switch {
+		case strings.HasPrefix(t, "⏺"): // new assistant block
+			flush()
+			cur = []string{l}
+		case strings.HasPrefix(t, "❯") || strings.HasPrefix(t, "✻") || strings.HasPrefix(t, "●"):
+			flush() // user / status / UI — ends the current block
+		default:
+			if cur != nil {
+				cur = append(cur, l)
+			}
+		}
+	}
+	flush()
+	return blocks
+}
+
+// CleanBlock returns the spoken prose for a block, or "" if it's machinery
+// (a tool call, its results, diffs, etc.).
+func CleanBlock(block, sent []string) string {
+	return filterReply(block, sent)
+}
+
 // WaitForReply polls the pane until its content stops changing (the agent has
 // finished responding), then returns the new text that appeared since baseline,
 // with the echoed input `sent` and obvious UI noise removed. baseline is a
