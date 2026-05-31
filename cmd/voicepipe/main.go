@@ -633,6 +633,9 @@ func cmdTalk(ctx context.Context, args []string) error {
 				continue
 			}
 			setConn(id, label)
+			if cfg.FocusOnConnect {
+				tmuxpane.Focus(cctx, id) // bring the agent into view
+			}
 			printLine("  " + ui.Accent("⇄") + " connected to " + ui.Accent(label) + " " + ui.Dim("· "+id))
 			say("Connected to " + label)
 		case "panes":

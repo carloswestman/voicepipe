@@ -71,6 +71,13 @@ func FindByName(ctx context.Context, name string) (Pane, bool, error) {
 	return Pane{}, false, nil
 }
 
+// Focus brings target's window and pane into view (selects the window, then the
+// pane). Single-session; this pulls focus off the voicepipe pane.
+func Focus(ctx context.Context, target string) {
+	_ = exec.CommandContext(ctx, "tmux", "select-window", "-t", target).Run()
+	_ = exec.CommandContext(ctx, "tmux", "select-pane", "-t", target).Run()
+}
+
 // WindowOf returns the window name for a target spec, or the target itself if it
 // can't be resolved.
 func WindowOf(ctx context.Context, target string) string {

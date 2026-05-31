@@ -77,22 +77,29 @@ type Config struct {
 	// DefaultAgent is the agent name `talk` auto-connects to on start (when no
 	// --pane is given). Empty means start unconnected.
 	DefaultAgent string `json:"default_agent"`
+
+	// FocusOnConnect brings an agent's tmux window/pane into view when you connect
+	// to it by voice, so you see who you're talking to. Note: it pulls focus off
+	// the voicepipe pane, so Esc-to-stop won't reach voicepipe until you click
+	// back. Default true.
+	FocusOnConnect bool `json:"focus_on_connect"`
 }
 
 // Default returns the recommended out-of-the-box configuration.
 func Default() Config {
 	return Config{
-		InputDevice: "", // follow the macOS default input device
-		ModelPath:   filepath.Join(dataDir(), "models", "ggml-large-v3-turbo.bin"),
-		WhisperBin:  "whisper-cli",
-		SendEnter:   false,
-		SilenceMs:   1200,
-		MaxSeconds:  30,
-		Language:    "en",
-		Prompt:      "Talking to Claude Code in tmux with neovim. Terms: Claude Code, tmux, neovim, voicepipe, Anthropic, Opus, Sonnet.",
-		Sink:        "keystroke", // works everywhere; tmux is opt-in via --target
-		CommandWord: "computer",
-		Agents:      map[string]string{},
+		InputDevice:    "", // follow the macOS default input device
+		ModelPath:      filepath.Join(dataDir(), "models", "ggml-large-v3-turbo.bin"),
+		WhisperBin:     "whisper-cli",
+		SendEnter:      false,
+		SilenceMs:      1200,
+		MaxSeconds:     30,
+		Language:       "en",
+		Prompt:         "Talking to Claude Code in tmux with neovim. Terms: Claude Code, tmux, neovim, voicepipe, Anthropic, Opus, Sonnet.",
+		Sink:           "keystroke", // works everywhere; tmux is opt-in via --target
+		CommandWord:    "computer",
+		Agents:         map[string]string{},
+		FocusOnConnect: true,
 	}
 }
 

@@ -6,6 +6,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 ### Added
+- `focus_on_connect` (config, default true): connecting to an agent by voice
+  brings its tmux window/pane into view, so you see who you're talking to. Note:
+  it pulls focus off the voicepipe pane, so Esc-to-stop needs you to click back.
 - `talk` shows a live, throbbing status line — orange `● listening…` (echoing the
   macOS mic indicator), then dim `thinking…` and `speaking…` — so you always know
   when the mic is hot and whose turn it is. Interactive only; hidden in `--verbose`.
