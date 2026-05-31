@@ -53,6 +53,13 @@ type Config struct {
 	// ClipboardPaste makes the clipboard sink auto-paste after copying (otherwise
 	// it copies and you paste yourself — the zero-permission fallback).
 	ClipboardPaste bool `json:"clipboard_paste"`
+
+	// Voice is the macOS `say` voice used by `talk` for spoken replies
+	// (empty = system default; see `say -v '?'` for options).
+	Voice string `json:"voice"`
+
+	// SpeechRate is the words-per-minute for spoken replies (0 = system default).
+	SpeechRate int `json:"speech_rate"`
 }
 
 // Default returns the recommended out-of-the-box configuration.

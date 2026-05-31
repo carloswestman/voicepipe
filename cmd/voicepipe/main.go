@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -18,6 +19,8 @@ import (
 	"github.com/carloswestman/voicepipe/internal/audio"
 	"github.com/carloswestman/voicepipe/internal/config"
 	"github.com/carloswestman/voicepipe/internal/inject"
+	"github.com/carloswestman/voicepipe/internal/speak"
+	"github.com/carloswestman/voicepipe/internal/tmuxpane"
 	"github.com/carloswestman/voicepipe/internal/transcribe"
 )
 
@@ -37,10 +40,14 @@ func main() {
 		err = cmdCapture(ctx, os.Args[2:])
 	case "listen":
 		err = cmdListen(ctx, os.Args[2:])
+	case "talk":
+		err = cmdTalk(ctx, os.Args[2:])
 	case "type":
 		err = cmdType(ctx, os.Args[2:])
 	case "init":
 		err = cmdInit(ctx)
+	case "panes":
+		err = cmdPanes(ctx)
 	case "devices":
 		err = cmdDevices()
 	case "doctor":
@@ -74,7 +81,11 @@ usage:
                                  (auto-submits each utterance; --no-send to disable;
                                   same sink flags as capture; Ctrl-C to stop)
             [--verbose | -v]      (capture/listen) log audio metrics + timing per utterance
+  voicepipe talk [--pane P]      two-way: speak to an agent (pane P, default active),
+                                 hear its reply read aloud (--voice NAME, --rate WPM)
+                                 (--pane and --target are aliases; P from "voicepipe panes")
   voicepipe type <text>          type given text via the keystroke sink (test typing)
+  voicepipe panes                list tmux panes (find a --target for talk)
   voicepipe devices              list microphone input devices
   voicepipe doctor               check that whisper-cpp, the model, and sinks are ready
   voicepipe tmux-install         print the tmux binding for power-mode routing
@@ -229,6 +240,122 @@ func cmdListen(ctx context.Context, args []string) error {
 	return nil
 }
 
+// cmdTalk is two-way voice: speak to one agent (a tmux pane) and hear its reply
+// read aloud. You talk → it types + submits into the pane → it waits for the
+// reply to settle → speaks the new text via `say`. Defaults the target to the
+// active pane. This is the foundation for hands-free, eyes-free agent control.
+func cmdTalk(ctx context.Context, args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if !speak.Available() {
+		return fmt.Errorf("`say` not found — talk needs macOS text-to-speech")
+	}
+
+	target := ""
+	voice := cfg.Voice
+	rate := cfg.SpeechRate
+	verbose := hasFlag(args, "--verbose", "-v")
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; a {
+		case "--target", "--pane", "-t":
+			if i+1 < len(args) {
+				target = args[i+1]
+				i++
+			}
+		case "--voice":
+			if i+1 < len(args) {
+				voice = args[i+1]
+				i++
+			}
+		case "--rate":
+			if i+1 < len(args) {
+				if n, e := strconv.Atoi(args[i+1]); e == nil {
+					rate = n
+				}
+				i++
+			}
+		case "--verbose", "-v":
+			// captured via hasFlag above; accept so it isn't treated as unknown
+		default:
+			// Surface typos loudly instead of silently misfiring. A bare value is
+			// accepted as the target (e.g. `talk dev:whisper.0`).
+			if strings.HasPrefix(a, "-") {
+				return fmt.Errorf("unknown flag: %s (see `voicepipe help`)", a)
+			}
+			if target != "" {
+				return fmt.Errorf("unexpected argument: %s", a)
+			}
+			target = a
+		}
+	}
+
+	if target == "" {
+		if target, err = tmuxpane.ActivePane(ctx); err != nil {
+			return err
+		}
+	} else if target, err = tmuxpane.ResolvePane(ctx, target); err != nil {
+		return err
+	}
+
+	// Guard the footgun: targeting voicepipe's own pane types into its own shell.
+	if own := os.Getenv("TMUX_PANE"); own != "" && own == target {
+		fmt.Fprintf(os.Stderr, "voicepipe: warning — target %s is this pane (voicepipe's own); you likely want a different agent. See `voicepipe panes`.\n", target)
+	}
+
+	sink := inject.TmuxSink{Target: target}
+	sopts := speak.Options{Voice: voice, Rate: rate}
+
+	fmt.Fprintf(os.Stderr, "voicepipe: talking with pane %s — speak, pause to send; replies read aloud. Ctrl-C to stop.\n", target)
+	for ctx.Err() == nil {
+		text, err := recordOnce(ctx, cfg, verbose)
+		if err != nil {
+			if ctx.Err() != nil {
+				break
+			}
+			fmt.Fprintln(os.Stderr, "voicepipe: error:", err)
+			continue
+		}
+		if text == "" {
+			continue
+		}
+
+		// Baseline the pane before sending so the reply diff excludes prior output.
+		baseline, err := tmuxpane.Capture(ctx, target)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "voicepipe: capture:", err)
+			continue
+		}
+		if err := sink.Deliver(ctx, text, true); err != nil {
+			fmt.Fprintln(os.Stderr, "voicepipe: deliver:", err)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "  → %s\n", text)
+
+		reply, err := tmuxpane.WaitForReply(ctx, target, baseline, text)
+		if err != nil {
+			if ctx.Err() != nil {
+				break
+			}
+			fmt.Fprintln(os.Stderr, "voicepipe: reply:", err)
+			continue
+		}
+		if reply == "" {
+			if verbose {
+				fmt.Fprintln(os.Stderr, "[reply]   (nothing new to read)")
+			}
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "  ◀ %s\n", reply)
+		if err := speak.Say(ctx, reply, sopts); err != nil && ctx.Err() == nil {
+			fmt.Fprintln(os.Stderr, "voicepipe: say:", err)
+		}
+	}
+	fmt.Fprintln(os.Stderr, "\nvoicepipe: stopped.")
+	return nil
+}
+
 // cmdType types its argument via the keystroke sink — a quick way to test typing
 // (and the Accessibility grant) without recording audio. Give it a 2s head start
 // so you can focus the target window.
@@ -286,6 +413,27 @@ func download(ctx context.Context, url, dest string) error {
 	}
 	f.Close()
 	return os.Rename(tmp, dest)
+}
+
+// cmdPanes lists every tmux pane so you can pick a --target for `talk`.
+func cmdPanes(ctx context.Context) error {
+	panes, err := tmuxpane.ListPanes(ctx)
+	if err != nil {
+		return err
+	}
+	if len(panes) == 0 {
+		fmt.Println("no tmux panes found")
+		return nil
+	}
+	fmt.Println("tmux panes (pass the id or location to --target):")
+	for _, p := range panes {
+		active := ""
+		if p.Active {
+			active = "  (active)"
+		}
+		fmt.Printf("  %-5s  %-28s  [%s]%s\n", p.ID, p.Location, p.Command, active)
+	}
+	return nil
 }
 
 func cmdDevices() error {

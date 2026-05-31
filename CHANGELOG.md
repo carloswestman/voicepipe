@@ -5,6 +5,18 @@ All notable changes to voicepipe are documented here. The format is based on
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- `talk` — two-way voice: speak to one agent (a tmux pane, default the active
+  one) and hear its reply read aloud via macOS `say`. Reads the reply by
+  diffing the pane after output settles and filtering UI noise, and sanitizes
+  symbols/markers/emoji so speech stays clean. Options: `--pane`/`--target`,
+  `--voice`, `--rate`. Config: `voice`, `speech_rate`.
+- `panes` — list all tmux panes (id, location, command) to find a `talk` target.
+
+### Changed
+- `talk` validates its target pane, accepts `--pane` (alias of `--target`) and a
+  bare pane argument, errors on unknown flags, and warns when targeting its own
+  pane.
 
 ## [0.1.0] - 2026-05-30
 ### Added
