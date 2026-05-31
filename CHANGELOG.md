@@ -6,6 +6,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 ### Added
+- `talk` shows a live, throbbing status line — orange `● listening…` (echoing the
+  macOS mic indicator), then dim `thinking…` and `speaking…` — so you always know
+  when the mic is hot and whose turn it is. Interactive only; hidden in `--verbose`.
 - `talk` — two-way voice: speak to one agent (a tmux pane, default the active
   one) and hear its reply read aloud via macOS `say`. Reads the reply by
   diffing the pane after output settles and filtering UI noise, and sanitizes

@@ -144,7 +144,10 @@ func sinkFromFlags(cfg config.Config, args []string, defaultSubmit bool) (inject
 // recordOnce captures one spoken utterance and returns its transcription
 // (empty string if nothing was heard). When verbose, it logs capture metrics and
 // timing to stderr to help explain what happened.
-func recordOnce(ctx context.Context, cfg config.Config, verbose bool) (string, error) {
+func recordOnce(ctx context.Context, cfg config.Config, verbose bool, onState func(string)) (string, error) {
+	if onState != nil {
+		onState("listening")
+	}
 	capStart := time.Now()
 	samples, stats, err := audio.CaptureUtterance(ctx, audio.Options{
 		DeviceSubstr: cfg.InputDevice,
@@ -163,6 +166,9 @@ func recordOnce(ctx context.Context, cfg config.Config, verbose bool) (string, e
 			fmt.Fprintln(os.Stderr, "[audio]   rejected: not enough voiced audio (noise/silence)")
 		}
 		return "", nil
+	}
+	if onState != nil {
+		onState("thinking")
 	}
 	wav := filepath.Join(os.TempDir(), "voicepipe.wav")
 	if err := audio.WriteWAV(wav, samples); err != nil {
@@ -203,7 +209,7 @@ func cmdCapture(ctx context.Context, args []string) error {
 	sink, sendEnter := sinkFromFlags(cfg, args, false) // one-shot: don't submit by default
 	verbose := hasFlag(args, "--verbose", "-v")
 
-	text, err := recordOnce(ctx, cfg, verbose)
+	text, err := recordOnce(ctx, cfg, verbose, nil)
 	if err != nil {
 		return err
 	}
@@ -228,7 +234,7 @@ func cmdListen(ctx context.Context, args []string) error {
 
 	fmt.Fprintln(os.Stderr, "voicepipe: listening — speak, pause to send. Ctrl-C to stop.")
 	for ctx.Err() == nil {
-		text, err := recordOnce(ctx, cfg, verbose)
+		text, err := recordOnce(ctx, cfg, verbose, nil)
 		if err != nil {
 			if ctx.Err() != nil {
 				break // interrupted mid-capture
@@ -368,6 +374,51 @@ func cmdTalk(ctx context.Context, args []string) error {
 		setSay(nil)
 	}
 
+	// Live throbbing status line: listening / thinking / speaking. The throb runs
+	// in a goroutine while the main loop is blocked in a wait; clearStatus joins it
+	// (so it finishes clearing the line) before any permanent print. Interactive
+	// only, and suppressed in verbose mode (which prints its own logs).
+	var stopThrob func()
+	throb := func(label string, style func(string) string) {
+		if !escStop || verbose {
+			return
+		}
+		if stopThrob != nil {
+			stopThrob()
+		}
+		done, stopped := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(stopped)
+			frames := []string{"·", "•", "●", "•"} // pulse small → large → small
+			for i := 0; ; i++ {
+				fmt.Fprintf(os.Stderr, "\r\x1b[K%s", style(frames[i%len(frames)]+" "+label))
+				select {
+				case <-done:
+					fmt.Fprint(os.Stderr, "\r\x1b[K")
+					return
+				case <-time.After(230 * time.Millisecond):
+				}
+			}
+		}()
+		stopThrob = func() { close(done); <-stopped; stopThrob = nil }
+	}
+	clearStatus := func() {
+		if stopThrob != nil {
+			stopThrob()
+		}
+	}
+	var onState func(string)
+	if !verbose {
+		onState = func(state string) {
+			switch state {
+			case "listening":
+				throb("listening…", ui.Orange) // orange = mic hot / your turn (matches macOS mic dot)
+			case "thinking":
+				throb("thinking…", ui.Dim)
+			}
+		}
+	}
+
 	// sendContent delivers one message to the connected pane and speaks the reply.
 	sendContent := func(text string) {
 		baseline, err := tmuxpane.Capture(ctx, target)
@@ -380,7 +431,9 @@ func cmdTalk(ctx context.Context, args []string) error {
 			return
 		}
 		fmt.Fprintf(os.Stderr, "  %s %s\n", ui.Accent("→"), ui.Dim(text))
+		throb("thinking…", ui.Dim)
 		reply, err := tmuxpane.WaitForReply(ctx, target, baseline, text)
+		clearStatus()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "voicepipe: reply:", err)
 			return
@@ -392,7 +445,9 @@ func cmdTalk(ctx context.Context, args []string) error {
 			return
 		}
 		fmt.Fprintf(os.Stderr, "  %s %s %s\n", ui.Green("←"), ui.Green(agentLabel+":"), reply)
+		throb("speaking…", ui.Dim)
 		speakReply(reply)
+		clearStatus()
 	}
 
 	talkBanner(agentLabel, target, wake, cfg.Agents)
@@ -402,7 +457,8 @@ func cmdTalk(ctx context.Context, args []string) error {
 	paused := false
 
 	for ctx.Err() == nil {
-		text, err := recordOnce(ctx, cfg, verbose)
+		text, err := recordOnce(ctx, cfg, verbose, onState)
+		clearStatus()
 		if err != nil {
 			if ctx.Err() != nil {
 				break

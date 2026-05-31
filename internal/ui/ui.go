@@ -27,6 +27,7 @@ const (
 	cGreen  = "\x1b[32m"
 	cYellow = "\x1b[33m"
 	cRed    = "\x1b[31m"
+	cOrange = "\x1b[38;5;208m" // 256-color orange, echoing the macOS mic indicator
 )
 
 func wrap(code, s string) string {
@@ -49,3 +50,7 @@ func Accent(s string) string { return wrap(cCyan, s) }
 func Green(s string) string  { return wrap(cGreen, s) }
 func Yellow(s string) string { return wrap(cYellow, s) }
 func Red(s string) string    { return wrap(cRed, s) }
+
+// Orange renders text in orange — used for the "listening" mic indicator, to
+// echo the macOS orange mic dot.
+func Orange(s string) string { return wrap(cOrange, s) }
