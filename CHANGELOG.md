@@ -5,6 +5,8 @@ All notable changes to voicepipe are documented here. The format is based on
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.2.0] - 2026-05-31
 ### Added
 - `focus_on_connect` (config, default true): connecting to an agent by voice
   brings its tmux window/pane into view, so you see who you're talking to. Note:
@@ -87,5 +89,6 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `--verbose` diagnostics: audio metrics and timing per utterance.
 - Configuration via `~/Library/Application Support/voicepipe/config.json`.
 
-[Unreleased]: https://github.com/carloswestman/voicepipe/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/carloswestman/voicepipe/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/carloswestman/voicepipe/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/carloswestman/voicepipe/releases/tag/v0.1.0

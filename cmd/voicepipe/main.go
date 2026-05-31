@@ -32,6 +32,10 @@ import (
 
 const modelURL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"
 
+// version is the release version, overridable at build time via
+// -ldflags "-X main.version=…".
+var version = "0.2.0"
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -63,7 +67,7 @@ func main() {
 	case "tmux-install":
 		err = cmdTmuxInstall()
 	case "version", "-v", "--version":
-		fmt.Println("voicepipe dev")
+		fmt.Println("voicepipe " + version)
 	case "help", "-h", "--help":
 		usage()
 	default:
