@@ -7,3 +7,8 @@
 
 # scratch
 *.wav
+
+# local scratch — raw recordings, launch drafts, WIP assets. Never committed.
+# Keep final, optimized assets that ship (the README demo GIF, screenshots) in
+# docs/ instead, or host large video on GitHub's CDN to keep the repo lean.
+/scratch/
