@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -330,18 +331,81 @@ func cmdTalk(ctx context.Context, args []string) error {
 	}
 	sopts := speak.Options{Voice: voice, Rate: rate}
 	wake := cfg.CommandWord
-	// Bias whisper toward the wake word, command verbs, and agent names so spoken
-	// commands like "computer panes" and "connect to agent two" transcribe right.
+	// Bias whisper toward the wake word, command verbs, and agent names.
 	cfg.Prompt = talkPrompt(cfg)
-	say := func(s string) { _ = speak.Say(ctx, s, sopts) }
 
-	// Esc-to-stop: while a reply is being read aloud, pressing Esc in this pane
-	// kills playback. Active only when stdin is a terminal (cbreak succeeds).
+	interactive := false
+	if restore, ok := enterCbreak(); ok {
+		defer restore()
+		interactive = true
+	}
+
+	// Shared connection state and recent sends (echo filtering), guarded by stMu.
 	var (
-		sayMu     sync.Mutex
-		activeSay *exec.Cmd
+		stMu       sync.Mutex
+		curTarget  = target
+		curLabel   = agentLabel
+		rebaseline = target != ""
+		recentSent []string
 	)
-	setSay := func(c *exec.Cmd) { sayMu.Lock(); activeSay = c; sayMu.Unlock() }
+	getConn := func() (string, string) { stMu.Lock(); defer stMu.Unlock(); return curTarget, curLabel }
+	setConn := func(t, l string) { stMu.Lock(); curTarget, curLabel, rebaseline = t, l, true; stMu.Unlock() }
+	takeRebaseline := func() bool { stMu.Lock(); defer stMu.Unlock(); r := rebaseline; rebaseline = false; return r }
+	addSent := func(s string) {
+		stMu.Lock()
+		recentSent = append(recentSent, s)
+		if len(recentSent) > 10 {
+			recentSent = recentSent[len(recentSent)-10:]
+		}
+		stMu.Unlock()
+	}
+	getSent := func() []string {
+		stMu.Lock()
+		defer stMu.Unlock()
+		cp := make([]string, len(recentSent))
+		copy(cp, recentSent)
+		return cp
+	}
+
+	// Synchronized output + throbbing status line, guarded by outMu.
+	var (
+		outMu      sync.Mutex
+		stState    = "listening"
+		throbFrame int
+	)
+	frames := []string{"·", "•", "●", "•"}
+	renderLocked := func() {
+		if !interactive || verbose {
+			return
+		}
+		style, label := ui.Orange, "listening…" // orange = mic hot (matches macOS dot)
+		switch stState {
+		case "thinking":
+			style, label = ui.Dim, "thinking…"
+		case "speaking":
+			style, label = ui.Dim, "speaking…"
+		}
+		fmt.Fprintf(os.Stderr, "\r\x1b[K%s", style(frames[throbFrame%len(frames)]+" "+label))
+	}
+	setState := func(st string) { outMu.Lock(); stState = st; renderLocked(); outMu.Unlock() }
+	printLine := func(s string) {
+		outMu.Lock()
+		if interactive && !verbose {
+			fmt.Fprint(os.Stderr, "\r\x1b[K")
+		}
+		fmt.Fprintln(os.Stderr, s)
+		renderLocked()
+		outMu.Unlock()
+	}
+
+	// Speech: serialize playback, mute the mic during it, allow Esc to kill it.
+	var (
+		sayMu     sync.Mutex // guards activeSay
+		speakMu   sync.Mutex // serializes playback
+		activeSay *exec.Cmd
+		muted     atomic.Bool
+		skipRead  atomic.Bool // Esc: stop current read AND skip the backlog
+	)
 	stopSay := func() {
 		sayMu.Lock()
 		if activeSay != nil && activeSay.Process != nil {
@@ -349,121 +413,182 @@ func cmdTalk(ctx context.Context, args []string) error {
 		}
 		sayMu.Unlock()
 	}
-	escStop := false
-	if restore, ok := enterCbreak(); ok {
-		defer restore()
-		escStop = true
-		go func() {
+	say := func(text string) {
+		speakMu.Lock()
+		defer speakMu.Unlock()
+		muted.Store(true)
+		c := speak.Command(ctx, text, sopts)
+		sayMu.Lock()
+		activeSay = c
+		sayMu.Unlock()
+		_ = c.Run()
+		sayMu.Lock()
+		activeSay = nil
+		sayMu.Unlock()
+		muted.Store(false)
+	}
+
+	// Persistent mic stream — open once, muted during playback. cctx lets `quit`
+	// tear down the stream, watcher, and throb cleanly.
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stream, err := audio.Stream(cctx, audio.Options{
+		DeviceSubstr: cfg.InputDevice,
+		SilenceMs:    cfg.SilenceMs,
+		MaxSeconds:   cfg.MaxSeconds,
+	}, &muted)
+	if err != nil {
+		return err
+	}
+
+	// Print the banner before starting any status-writing goroutine.
+	talkBanner(agentLabel, target, wake, cfg.Agents)
+
+	if interactive {
+		fmt.Fprintln(os.Stderr, "  "+ui.Dim("speak any time — input queues while the agent works; Esc stops a reply"))
+		go func() { // Esc-to-stop reader
 			buf := make([]byte, 1)
 			for {
-				n, err := os.Stdin.Read(buf)
-				if err != nil {
+				n, e := os.Stdin.Read(buf)
+				if e != nil {
 					return
 				}
-				if n > 0 && buf[0] == 0x1b { // Esc
+				if n > 0 && buf[0] == 0x1b {
 					stopSay()
+					skipRead.Store(true) // also drop any queued/backlogged reads
 				}
 			}
 		}()
-	}
-	// speakReply reads a reply aloud, interruptible by Esc.
-	speakReply := func(reply string) {
-		c := speak.Command(ctx, reply, sopts)
-		setSay(c)
-		_ = c.Run()
-		setSay(nil)
-	}
-
-	// Live throbbing status line: listening / thinking / speaking. The throb runs
-	// in a goroutine while the main loop is blocked in a wait; clearStatus joins it
-	// (so it finishes clearing the line) before any permanent print. Interactive
-	// only, and suppressed in verbose mode (which prints its own logs).
-	var stopThrob func()
-	throb := func(label string, style func(string) string) {
-		if !escStop || verbose {
-			return
-		}
-		if stopThrob != nil {
-			stopThrob()
-		}
-		done, stopped := make(chan struct{}), make(chan struct{})
-		go func() {
-			defer close(stopped)
-			frames := []string{"·", "•", "●", "•"} // pulse small → large → small
-			for i := 0; ; i++ {
-				fmt.Fprintf(os.Stderr, "\r\x1b[K%s", style(frames[i%len(frames)]+" "+label))
-				select {
-				case <-done:
-					fmt.Fprint(os.Stderr, "\r\x1b[K")
-					return
-				case <-time.After(230 * time.Millisecond):
+		if !verbose {
+			go func() { // throb ticker
+				t := time.NewTicker(230 * time.Millisecond)
+				defer t.Stop()
+				for {
+					select {
+					case <-cctx.Done():
+						outMu.Lock()
+						fmt.Fprint(os.Stderr, "\r\x1b[K")
+						outMu.Unlock()
+						return
+					case <-t.C:
+						outMu.Lock()
+						throbFrame++
+						renderLocked()
+						outMu.Unlock()
+					}
 				}
-			}
-		}()
-		stopThrob = func() { close(done); <-stopped; stopThrob = nil }
-	}
-	clearStatus := func() {
-		if stopThrob != nil {
-			stopThrob()
-		}
-	}
-	var onState func(string)
-	if !verbose {
-		onState = func(state string) {
-			switch state {
-			case "listening":
-				throb("listening…", ui.Orange) // orange = mic hot / your turn (matches macOS mic dot)
-			case "thinking":
-				throb("thinking…", ui.Dim)
-			}
+			}()
 		}
 	}
 
-	// sendContent delivers one message to the connected pane and speaks the reply.
-	sendContent := func(text string) {
-		baseline, err := tmuxpane.Capture(ctx, target)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "voicepipe: capture:", err)
-			return
-		}
-		if err := (inject.TmuxSink{Target: target}).Deliver(ctx, text, true); err != nil {
-			fmt.Fprintln(os.Stderr, "voicepipe: deliver:", err)
-			return
-		}
-		fmt.Fprintf(os.Stderr, "  %s %s\n", ui.Accent("→"), ui.Dim(text))
-		throb("thinking…", ui.Dim)
-		reply, err := tmuxpane.WaitForReply(ctx, target, baseline, text)
-		clearStatus()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "voicepipe: reply:", err)
-			return
-		}
-		if reply == "" {
+	// Reply watcher: reads each new settled reply from the connected agent aloud,
+	// independently of sending — so you can keep talking while the agent works.
+	go func() {
+		const poll = 150 * time.Millisecond
+		const settle = 700 * time.Millisecond
+		var prevVisible, consumedFull string
+		var lastChange time.Time
+		for {
+			select {
+			case <-cctx.Done():
+				return
+			case <-time.After(poll):
+			}
+			t, label := getConn()
+			if t == "" {
+				setState("listening")
+				continue
+			}
+			if skipRead.Swap(false) { // Esc pressed: fast-forward past the backlog
+				prevVisible, _ = tmuxpane.Capture(cctx, t)
+				consumedFull = tmuxpane.CaptureFull(cctx, t)
+				lastChange = time.Now()
+				setState("listening")
+				continue
+			}
+			if takeRebaseline() {
+				prevVisible, _ = tmuxpane.Capture(cctx, t)
+				consumedFull = tmuxpane.CaptureFull(cctx, t)
+				lastChange = time.Now()
+				setState("listening")
+				continue
+			}
+			// Change + "working" are judged on the VISIBLE screen (the live area),
+			// so old "esc to interrupt" lines in scrollback don't read as busy.
+			visible, _ := tmuxpane.Capture(cctx, t)
+			if visible != prevVisible {
+				if verbose {
+					fmt.Fprintf(os.Stderr, "[watch] changed → thinking | tail: %q\n", lastLine(visible))
+				}
+				prevVisible = visible
+				lastChange = time.Now()
+				setState("thinking")
+				continue
+			}
+			if tmuxpane.Working(visible) {
+				if verbose {
+					fmt.Fprintln(os.Stderr, "[watch] working indicator → thinking")
+				}
+				setState("thinking")
+				continue
+			}
+			if time.Since(lastChange) < settle {
+				if verbose {
+					fmt.Fprintln(os.Stderr, "[watch] stable, settling…")
+				}
+				continue // wait for the screen to settle
+			}
+			// Settled: extract the reply from the full (scrollback) capture.
+			full := tmuxpane.CaptureFull(cctx, t)
+			if full == consumedFull {
+				if verbose {
+					fmt.Fprintln(os.Stderr, "[watch] settled, no new content → listening")
+				}
+				setState("listening")
+				continue
+			}
+			reply := tmuxpane.NewReply(consumedFull, full, getSent())
+			consumedFull = full
+			if reply == "" {
+				if verbose {
+					fmt.Fprintln(os.Stderr, "[watch] settled, new content filtered to empty → listening")
+				}
+				setState("listening")
+				continue
+			}
 			if verbose {
-				fmt.Fprintln(os.Stderr, "[reply]   (nothing new to read)")
+				fmt.Fprintf(os.Stderr, "[watch] reading reply (%d chars)\n", len(reply))
 			}
-			return
+			printLine("  " + ui.Green("←") + " " + ui.Green(label+":") + " " + reply)
+			setState("speaking")
+			say(reply)
+			setState("listening")
 		}
-		fmt.Fprintf(os.Stderr, "  %s %s %s\n", ui.Green("←"), ui.Green(agentLabel+":"), reply)
-		throb("speaking…", ui.Dim)
-		speakReply(reply)
-		clearStatus()
-	}
+	}()
 
-	talkBanner(agentLabel, target, wake, cfg.Agents)
-	if escStop {
-		fmt.Fprintln(os.Stderr, "  "+ui.Dim("press Esc to stop a reply mid-playback"))
-	}
+	// Main loop: transcribe each utterance and send it (or run a command)
+	// immediately — never blocks on a reply.
 	paused := false
-
-	for ctx.Err() == nil {
-		text, err := recordOnce(ctx, cfg, verbose, onState)
-		clearStatus()
-		if err != nil {
-			if ctx.Err() != nil {
-				break
+	for {
+		var (
+			samples []int16
+			ok      bool
+		)
+		select {
+		case <-cctx.Done():
+			fmt.Fprintln(os.Stderr, "\nvoicepipe: stopped.")
+			return nil
+		case samples, ok = <-stream:
+			if !ok {
+				fmt.Fprintln(os.Stderr, "\nvoicepipe: stopped.")
+				return nil
 			}
-			fmt.Fprintln(os.Stderr, "voicepipe: error:", err)
+		}
+		text, terr := transcribeSamples(cctx, cfg, samples)
+		if terr != nil {
+			if cctx.Err() == nil {
+				printLine("voicepipe: " + terr.Error())
+			}
 			continue
 		}
 		if text == "" {
@@ -473,75 +598,115 @@ func cmdTalk(ctx context.Context, args []string) error {
 		cmd := command.Parse(text, wake)
 		if !cmd.IsCommand {
 			if paused {
-				if verbose {
-					fmt.Fprintf(os.Stderr, "  (paused — say \"%s resume\") ignored: %s\n", wake, text)
-				}
 				continue
 			}
-			if target == "" {
-				fmt.Fprintf(os.Stderr, "  %s\n", ui.Dim("not connected — say \""+wake+" connect to <agent>\""))
+			t, _ := getConn()
+			if t == "" {
+				printLine("  " + ui.Dim("not connected — say \""+wake+" connect to <agent>\""))
 				say("Not connected. Say " + wake + " connect to an agent.")
 				continue
 			}
-			sendContent(text)
+			if e := (inject.TmuxSink{Target: t}).Deliver(cctx, text, true); e != nil {
+				printLine("voicepipe: deliver: " + e.Error())
+				continue
+			}
+			addSent(text)
+			printLine("  " + ui.Accent("→") + " " + ui.Dim(text))
 			continue
 		}
 
 		switch cmd.Verb {
 		case "pause":
 			paused = true
-			fmt.Fprintf(os.Stderr, "  %s %s\n", ui.Yellow("⏸"), ui.Dim("paused — say \""+wake+" resume\" to continue"))
+			printLine("  " + ui.Yellow("⏸") + " " + ui.Dim("paused — say \""+wake+" resume\" to continue"))
 			say("Paused.")
 		case "resume":
 			paused = false
-			fmt.Fprintf(os.Stderr, "  %s %s\n", ui.Green("▶"), ui.Dim("resumed"))
+			printLine("  " + ui.Green("▶") + " " + ui.Dim("resumed"))
 			say("Resumed.")
 		case "connect":
-			id, label, ok, e := resolveAgent(ctx, cfg.Agents, cmd.Arg)
+			id, label, found, e := resolveAgent(cctx, cfg.Agents, cmd.Arg)
 			if e != nil {
-				fmt.Fprintln(os.Stderr, "voicepipe: connect:", e)
+				printLine("voicepipe: connect: " + e.Error())
 				continue
 			}
-			if !ok {
-				fmt.Fprintf(os.Stderr, "  %s\n", ui.Yellow("no agent matching \""+cmd.Arg+"\""))
+			if !found {
+				printLine("  " + ui.Yellow("no agent matching \""+cmd.Arg+"\""))
 				say("No agent matching " + cmd.Arg)
 				continue
 			}
-			target = id
-			agentLabel = label
-			fmt.Fprintf(os.Stderr, "  %s connected to %s %s\n", ui.Accent("⇄"), ui.Accent(label), ui.Dim("· "+id))
+			setConn(id, label)
+			printLine("  " + ui.Accent("⇄") + " connected to " + ui.Accent(label) + " " + ui.Dim("· "+id))
 			say("Connected to " + label)
 		case "panes":
-			listAgentsAloud(ctx, cfg.Agents, target, say)
+			t, _ := getConn()
+			listAgentsAloud(cctx, cfg.Agents, t, printLine, say)
 		case "status":
-			if target == "" {
-				fmt.Fprintln(os.Stderr, "  "+ui.Dim("not connected"))
+			t, _ := getConn()
+			if t == "" {
+				printLine("  " + ui.Dim("not connected"))
 				say("Not connected.")
 			} else {
-				win := tmuxpane.WindowOf(ctx, target)
-				fmt.Fprintf(os.Stderr, "  %s connected to %s %s\n", ui.Accent("⇄"), ui.Accent(win), ui.Dim("· "+target))
+				win := tmuxpane.WindowOf(cctx, t)
+				printLine("  " + ui.Accent("⇄") + " connected to " + ui.Accent(win) + " " + ui.Dim("· "+t))
 				say("Connected to " + win)
 			}
 		case "send":
-			if err := (inject.TmuxSink{Target: target}).Submit(ctx); err != nil {
-				fmt.Fprintln(os.Stderr, "voicepipe: send:", err)
+			t, _ := getConn()
+			if e := (inject.TmuxSink{Target: t}).Submit(cctx); e != nil {
+				printLine("voicepipe: send: " + e.Error())
 			} else {
-				fmt.Fprintf(os.Stderr, "  %s %s\n", ui.Dim("⏎"), ui.Dim("sent"))
+				printLine("  " + ui.Dim("⏎ sent"))
 			}
 		case "help":
-			printCommandHelp(wake)
+			printCommandHelp(wake, printLine)
 			say("Commands: connect, agents, status, pause, resume, send, help, and quit.")
 		case "quit":
 			say("Goodbye.")
+			cancel()
 			fmt.Fprintln(os.Stderr, "\nvoicepipe: stopped.")
 			return nil
 		default:
-			fmt.Fprintf(os.Stderr, "  unknown command %q — say \"%s help\"\n", cmd.Verb, wake)
+			printLine("  " + ui.Dim("unknown command \""+cmd.Verb+"\" — say \""+wake+" help\""))
 			say("Unknown command. Say " + wake + " help.")
 		}
 	}
-	fmt.Fprintln(os.Stderr, "\nvoicepipe: stopped.")
-	return nil
+}
+
+// lastLine returns the last non-empty line of s (trimmed, capped), for debug logs.
+func lastLine(s string) string {
+	for _, l := range reverseLines(s) {
+		if t := strings.TrimSpace(l); t != "" {
+			if len(t) > 70 {
+				t = t[:70]
+			}
+			return t
+		}
+	}
+	return ""
+}
+
+func reverseLines(s string) []string {
+	lines := strings.Split(s, "\n")
+	for i, j := 0, len(lines)-1; i < j; i, j = i+1, j-1 {
+		lines[i], lines[j] = lines[j], lines[i]
+	}
+	return lines
+}
+
+// transcribeSamples writes the utterance to a temp WAV and transcribes it.
+func transcribeSamples(ctx context.Context, cfg config.Config, samples []int16) (string, error) {
+	wav := filepath.Join(os.TempDir(), "voicepipe-talk.wav")
+	if err := audio.WriteWAV(wav, samples); err != nil {
+		return "", err
+	}
+	defer os.Remove(wav)
+	return transcribe.FromWAV(ctx, wav, transcribe.Options{
+		WhisperBin: cfg.WhisperBin,
+		ModelPath:  cfg.ModelPath,
+		Language:   cfg.Language,
+		Prompt:     cfg.Prompt,
+	})
 }
 
 // resolveAgent maps a spoken name to a pane id: registry first, then a tmux
@@ -585,8 +750,8 @@ func talkBanner(agentLabel, target, wake string, agents map[string]string) {
 	fmt.Fprintln(os.Stderr, "  "+ui.Dim("speak to message the connected agent; replies are read aloud."))
 }
 
-func printCommandHelp(wake string) {
-	fmt.Fprintf(os.Stderr, "  %s %s\n", ui.Accent("?"), ui.Bold("commands")+ui.Dim(" · say \""+wake+"\" first"))
+func printCommandHelp(wake string, printLine func(string)) {
+	printLine("  " + ui.Accent("?") + " " + ui.Bold("commands") + ui.Dim(" · say \""+wake+"\" first"))
 	for _, c := range [][2]string{
 		{"connect <agent>", "switch which agent you talk to"},
 		{"agents", "list your agents"},
@@ -597,11 +762,11 @@ func printCommandHelp(wake string) {
 		{"help", "show this list"},
 		{"quit", "exit talk"},
 	} {
-		fmt.Fprintf(os.Stderr, "    %s %-16s %s\n", ui.Dim("·"), c[0], ui.Dim(c[1]))
+		printLine(fmt.Sprintf("    %s %-16s %s", ui.Dim("·"), c[0], ui.Dim(c[1])))
 	}
 }
 
-func listAgentsAloud(ctx context.Context, agents map[string]string, current string, say func(string)) {
+func listAgentsAloud(ctx context.Context, agents map[string]string, current string, printLine, say func(string)) {
 	if len(agents) > 0 {
 		names := sortedKeys(agents)
 		connected := ""
@@ -609,12 +774,12 @@ func listAgentsAloud(ctx context.Context, agents map[string]string, current stri
 			id, e := tmuxpane.ResolvePane(ctx, agents[n])
 			switch {
 			case e != nil:
-				fmt.Fprintf(os.Stderr, "  %s %s %s\n", ui.Red("●"), ui.Dim(fmt.Sprintf("%-14s", n)), ui.Dim("offline"))
+				printLine(fmt.Sprintf("  %s %s %s", ui.Red("●"), ui.Dim(fmt.Sprintf("%-14s", n)), ui.Dim("offline")))
 			case id == current:
 				connected = n
-				fmt.Fprintf(os.Stderr, "  %s %s %s\n", ui.Accent("⇄"), ui.Accent(fmt.Sprintf("%-14s", n)), ui.Dim("connected"))
+				printLine(fmt.Sprintf("  %s %s %s", ui.Accent("⇄"), ui.Accent(fmt.Sprintf("%-14s", n)), ui.Dim("connected")))
 			default:
-				fmt.Fprintf(os.Stderr, "  %s %-14s %s\n", ui.Green("●"), n, ui.Dim("· "+id))
+				printLine(fmt.Sprintf("  %s %-14s %s", ui.Green("●"), n, ui.Dim("· "+id)))
 			}
 		}
 		msg := "Agents: " + strings.Join(names, ", ")
@@ -627,15 +792,14 @@ func listAgentsAloud(ctx context.Context, agents map[string]string, current stri
 	// No registry: fall back to listing tmux windows.
 	panes, err := tmuxpane.ListPanes(ctx)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "voicepipe: panes:", err)
+		printLine("voicepipe: panes: " + err.Error())
 		return
 	}
 	var windows []string
 	seen := map[string]bool{}
 	for _, p := range panes {
-		w := p.Window()
-		fmt.Fprintf(os.Stderr, "  %-5s %s\n", p.ID, p.Location)
-		if !seen[w] {
+		printLine(fmt.Sprintf("  %-5s %s", p.ID, p.Location))
+		if w := p.Window(); !seen[w] {
 			seen[w] = true
 			windows = append(windows, w)
 		}

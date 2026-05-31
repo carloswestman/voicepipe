@@ -132,6 +132,38 @@ func Capture(ctx context.Context, target string) (string, error) {
 	return string(out), nil
 }
 
+// CaptureFull captures the pane including recent scrollback (so long, scrolled
+// replies aren't truncated to the visible screen). Returns "" on error.
+func CaptureFull(ctx context.Context, target string) string {
+	args := []string{"capture-pane", "-p", "-S", "-500"}
+	if target != "" {
+		args = append(args, "-t", target)
+	}
+	out, err := exec.CommandContext(ctx, "tmux", args...).Output()
+	if err != nil {
+		return ""
+	}
+	return string(out)
+}
+
+// workingIndicator matches only the animated braille spinner — which moves just
+// while the agent is generating. We deliberately do NOT match "esc to interrupt":
+// in auto-accept mode that hint sits in the footer permanently, so it would read
+// as forever-busy. Stability of the screen is the primary "done" signal; the
+// spinner is a backup so a streaming pause isn't mistaken for done.
+var workingIndicator = regexp.MustCompile(`[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]`)
+
+// Working reports whether a pane capture shows the agent actively working.
+func Working(capture string) bool {
+	return workingIndicator.MatchString(capture)
+}
+
+// NewReply returns the cleaned assistant text present in cur but not in prev,
+// with the echoed input (sent) and UI noise removed — what the watcher speaks.
+func NewReply(prev, cur string, sent []string) string {
+	return filterReply(delta(prev, cur), sent)
+}
+
 // WaitForReply polls the pane until its content stops changing (the agent has
 // finished responding), then returns the new text that appeared since baseline,
 // with the echoed input `sent` and obvious UI noise removed. baseline is a
@@ -165,10 +197,10 @@ func WaitForReply(ctx context.Context, target, baseline, sent string) (string, e
 			lastChange = time.Now()
 			first = false
 		case changed && time.Since(lastChange) >= stableFor:
-			return filterReply(delta(baseline, cur), sent), nil
+			return filterReply(delta(baseline, cur), []string{sent}), nil
 		}
 		if time.Since(start) >= maxWait {
-			return filterReply(delta(baseline, cur), sent), nil
+			return filterReply(delta(baseline, cur), []string{sent}), nil
 		}
 		select {
 		case <-ctx.Done():
@@ -202,9 +234,9 @@ var (
 	statusLine = regexp.MustCompile(`(?i)(esc to interrupt|tokens?|ctrl\+|✻|✶|✻|⏵|⎿|◯|↑|↓|\b\d+s\b)`)
 )
 
-// filterReply drops UI noise and the echoed input, returning a single spoken line.
-func filterReply(lines []string, sent string) string {
-	sent = strings.TrimSpace(sent)
+// filterReply drops UI noise and any echoed input (sent — several messages may be
+// in flight), returning a single spoken line.
+func filterReply(lines []string, sent []string) string {
 	var kept []string
 	for _, l := range lines {
 		s := strings.TrimSpace(l)
@@ -214,12 +246,22 @@ func filterReply(lines []string, sent string) string {
 		if strings.HasPrefix(s, ">") { // input prompt line
 			continue
 		}
-		if sent != "" && (strings.Contains(s, sent) || strings.Contains(sent, s)) {
-			continue // our own echoed input
+		if matchesAny(s, sent) { // our own echoed input
+			continue
 		}
 		kept = append(kept, s)
 	}
 	return sanitizeForSpeech(strings.Join(kept, " "))
+}
+
+func matchesAny(line string, sent []string) bool {
+	for _, x := range sent {
+		x = strings.TrimSpace(x)
+		if x != "" && (strings.Contains(line, x) || strings.Contains(x, line)) {
+			return true
+		}
+	}
+	return false
 }
 
 // sanitizeForSpeech strips characters that text-to-speech would awkwardly name —

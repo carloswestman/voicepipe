@@ -39,6 +39,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stale ones.
 
 ### Changed
+- `talk` rewritten as a concurrent loop. A **persistent mic stream** opens once
+  and stays live (steady indicator, no reopen lag), muted only during playback so
+  Ava is never recorded back (the no-headphones echo fix). **Sending never blocks**
+  — speak several messages while the agent works and they queue into it like typed
+  input. A separate **watcher** reads each settled reply aloud independently.
+  Reply completion is detected by screen stability plus the animated spinner
+  (ignoring the persistent "esc to interrupt" footer). **Esc** stops the current
+  read and skips the backlog.
 - `talk` validates its target pane, accepts `--pane` (alias of `--target`) and a
   bare pane argument, errors on unknown flags, and warns when targeting its own
   pane.

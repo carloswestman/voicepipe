@@ -8,7 +8,7 @@ func TestReplyExtraction(t *testing.T) {
 	// a status/spinner line, and the empty input prompt.
 	cur := "> fix the bug\n\nSure, I fixed the failing test.\n\n  esc to interrupt\n> \n"
 
-	got := filterReply(delta(baseline, cur), "fix the bug")
+	got := filterReply(delta(baseline, cur), []string{"fix the bug"})
 	want := "Sure, I fixed the failing test."
 	if got != want {
 		t.Fatalf("filterReply = %q, want %q", got, want)
@@ -45,7 +45,7 @@ func TestParsePanes(t *testing.T) {
 
 func TestFilterDropsUIOnly(t *testing.T) {
 	lines := []string{"╭─────────╮", "│ ✻ Thinking… │", "> ", "   ", "esc to interrupt"}
-	if got := filterReply(lines, ""); got != "" {
+	if got := filterReply(lines, nil); got != "" {
 		t.Fatalf("expected all UI noise dropped, got %q", got)
 	}
 }
