@@ -300,20 +300,28 @@ func cmdTalk(ctx context.Context, args []string) error {
 		}
 	}
 
-	if target == "" {
-		if target, err = tmuxpane.ActivePane(ctx); err != nil {
+	// A target is only set when given explicitly; otherwise start unconnected and
+	// wait for a `connect` command — don't silently target the active pane.
+	if target != "" {
+		if target, err = tmuxpane.ResolvePane(ctx, target); err != nil {
 			return err
 		}
-	} else if target, err = tmuxpane.ResolvePane(ctx, target); err != nil {
-		return err
+		if own := os.Getenv("TMUX_PANE"); own != "" && own == target {
+			fmt.Fprintf(os.Stderr, "voicepipe: warning — target %s is this pane (voicepipe's own); pick a different agent.\n", target)
+		}
 	}
 
-	// Guard the footgun: targeting voicepipe's own pane types into its own shell.
-	if own := os.Getenv("TMUX_PANE"); own != "" && own == target {
-		fmt.Fprintf(os.Stderr, "voicepipe: warning — target %s is this pane (voicepipe's own); you likely want a different agent. See `voicepipe panes`.\n", target)
+	agentLabel := "" // name shown on replies; set when connected
+	if target != "" {
+		agentLabel = tmuxpane.WindowOf(ctx, target)
+	} else if cfg.DefaultAgent != "" {
+		// Auto-connect to the configured default agent on start.
+		if id, label, ok, e := resolveAgent(ctx, cfg.Agents, cfg.DefaultAgent); e == nil && ok {
+			target, agentLabel = id, label
+		} else {
+			fmt.Fprintf(os.Stderr, "voicepipe: default agent %q not found — starting unconnected\n", cfg.DefaultAgent)
+		}
 	}
-
-	agentLabel := tmuxpane.WindowOf(ctx, target) // name shown on replies; updated by connect
 	sopts := speak.Options{Voice: voice, Rate: rate}
 	wake := cfg.CommandWord
 	// Bias whisper toward the wake word, command verbs, and agent names so spoken
@@ -371,7 +379,7 @@ func cmdTalk(ctx context.Context, args []string) error {
 			fmt.Fprintln(os.Stderr, "voicepipe: deliver:", err)
 			return
 		}
-		fmt.Fprintf(os.Stderr, "  %s %s\n", ui.Accent("→"), text)
+		fmt.Fprintf(os.Stderr, "  %s %s\n", ui.Accent("→"), ui.Dim(text))
 		reply, err := tmuxpane.WaitForReply(ctx, target, baseline, text)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "voicepipe: reply:", err)
@@ -387,7 +395,7 @@ func cmdTalk(ctx context.Context, args []string) error {
 		speakReply(reply)
 	}
 
-	talkBanner(tmuxpane.WindowOf(ctx, target)+ui.Dim(" · ")+target, wake, cfg.Agents)
+	talkBanner(agentLabel, target, wake, cfg.Agents)
 	if escStop {
 		fmt.Fprintln(os.Stderr, "  "+ui.Dim("press Esc to stop a reply mid-playback"))
 	}
@@ -412,6 +420,11 @@ func cmdTalk(ctx context.Context, args []string) error {
 				if verbose {
 					fmt.Fprintf(os.Stderr, "  (paused — say \"%s resume\") ignored: %s\n", wake, text)
 				}
+				continue
+			}
+			if target == "" {
+				fmt.Fprintf(os.Stderr, "  %s\n", ui.Dim("not connected — say \""+wake+" connect to <agent>\""))
+				say("Not connected. Say " + wake + " connect to an agent.")
 				continue
 			}
 			sendContent(text)
@@ -443,11 +456,16 @@ func cmdTalk(ctx context.Context, args []string) error {
 			fmt.Fprintf(os.Stderr, "  %s connected to %s %s\n", ui.Accent("⇄"), ui.Accent(label), ui.Dim("· "+id))
 			say("Connected to " + label)
 		case "panes":
-			listAgentsAloud(ctx, cfg.Agents, say)
+			listAgentsAloud(ctx, cfg.Agents, target, say)
 		case "status":
-			win := tmuxpane.WindowOf(ctx, target)
-			fmt.Fprintf(os.Stderr, "  %s connected to %s %s\n", ui.Accent("⇄"), ui.Accent(win), ui.Dim("· "+target))
-			say("Connected to " + win)
+			if target == "" {
+				fmt.Fprintln(os.Stderr, "  "+ui.Dim("not connected"))
+				say("Not connected.")
+			} else {
+				win := tmuxpane.WindowOf(ctx, target)
+				fmt.Fprintf(os.Stderr, "  %s connected to %s %s\n", ui.Accent("⇄"), ui.Accent(win), ui.Dim("· "+target))
+				say("Connected to " + win)
+			}
 		case "send":
 			if err := (inject.TmuxSink{Target: target}).Submit(ctx); err != nil {
 				fmt.Fprintln(os.Stderr, "voicepipe: send:", err)
@@ -495,10 +513,14 @@ func resolveAgent(ctx context.Context, agents map[string]string, name string) (i
 	return "", "", false, nil
 }
 
-func talkBanner(connected, wake string, agents map[string]string) {
+func talkBanner(agentLabel, target, wake string, agents map[string]string) {
 	label := func(s string) string { return ui.Dim(fmt.Sprintf("%-10s", s)) }
 	fmt.Fprintln(os.Stderr, ui.Bold("voicepipe")+ui.Dim(" · talk"))
-	fmt.Fprintf(os.Stderr, "  %s%s\n", label("connected"), ui.Accent(connected))
+	if target != "" {
+		fmt.Fprintf(os.Stderr, "  %s%s%s\n", label("connected"), ui.Accent(agentLabel), ui.Dim(" · "+target))
+	} else {
+		fmt.Fprintf(os.Stderr, "  %s%s\n", label("agent"), ui.Dim("not connected — say \""+wake+" connect to <agent>\""))
+	}
 	if len(agents) > 0 {
 		fmt.Fprintf(os.Stderr, "  %s%s\n", label("agents"), strings.Join(sortedKeys(agents), ui.Dim("  ")))
 	}
@@ -523,13 +545,27 @@ func printCommandHelp(wake string) {
 	}
 }
 
-func listAgentsAloud(ctx context.Context, agents map[string]string, say func(string)) {
+func listAgentsAloud(ctx context.Context, agents map[string]string, current string, say func(string)) {
 	if len(agents) > 0 {
 		names := sortedKeys(agents)
+		connected := ""
 		for _, n := range names {
-			fmt.Fprintf(os.Stderr, "  %s → %s\n", n, agents[n])
+			id, e := tmuxpane.ResolvePane(ctx, agents[n])
+			switch {
+			case e != nil:
+				fmt.Fprintf(os.Stderr, "  %s %s %s\n", ui.Red("●"), ui.Dim(fmt.Sprintf("%-14s", n)), ui.Dim("offline"))
+			case id == current:
+				connected = n
+				fmt.Fprintf(os.Stderr, "  %s %s %s\n", ui.Accent("⇄"), ui.Accent(fmt.Sprintf("%-14s", n)), ui.Dim("connected"))
+			default:
+				fmt.Fprintf(os.Stderr, "  %s %-14s %s\n", ui.Green("●"), n, ui.Dim("· "+id))
+			}
 		}
-		say("Agents: " + strings.Join(names, ", "))
+		msg := "Agents: " + strings.Join(names, ", ")
+		if connected != "" {
+			msg += ". Connected to " + connected + "."
+		}
+		say(msg)
 		return
 	}
 	// No registry: fall back to listing tmux windows.

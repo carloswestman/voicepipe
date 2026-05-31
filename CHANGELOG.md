@@ -28,8 +28,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Minimal terminal styling (`internal/ui`): bold/dim/accent and status colors
   across `talk`, `agents`, `panes`, `devices`, `doctor`, `init`, and errors.
   Auto-disables when output isn't a TTY or `NO_COLOR` is set — no dependencies.
-- `talk` conversation view: cyan `→` for your message, green `←` with the agent's
-  name for each reply, `⇄` for the connection — a consistent icon set.
+- `talk` conversation view: dim cyan `→` for your message, green `←` with the
+  agent's name for each reply, `⇄` for the connection — a consistent icon set.
+- `talk` starts unconnected unless `--pane` or `default_agent` (config) is set,
+  instead of silently targeting the active pane; content is held with a prompt to
+  connect first. The in-session `agents` list marks the connected agent and flags
+  stale ones.
 
 ### Changed
 - `talk` validates its target pane, accepts `--pane` (alias of `--target`) and a

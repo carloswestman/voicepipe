@@ -71,6 +71,10 @@ type Config struct {
 	// agnostic about what runs there — anything that takes natural language. When
 	// empty, `connect` falls back to matching the spoken name to a tmux window.
 	Agents map[string]string `json:"agents"`
+
+	// DefaultAgent is the agent name `talk` auto-connects to on start (when no
+	// --pane is given). Empty means start unconnected.
+	DefaultAgent string `json:"default_agent"`
 }
 
 // Default returns the recommended out-of-the-box configuration.
