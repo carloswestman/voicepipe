@@ -1,0 +1,9 @@
+# build output
+/voicepipe
+/dist/
+
+# models are large; never commit
+*.bin
+
+# scratch
+*.wav
