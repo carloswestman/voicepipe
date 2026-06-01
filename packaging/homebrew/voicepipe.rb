@@ -3,8 +3,8 @@
 class Voicepipe < Formula
   desc "Talk to your terminal agents by voice — hands-free, fully local"
   homepage "https://github.com/carloswestman/voicepipe"
-  url "https://github.com/carloswestman/voicepipe/archive/refs/tags/v0.2.0.tar.gz"
-  sha256 "6fb2b311721ca3945059344514c34f172fe3f9ccb18ef320557371fb0d7e4c74"
+  url "https://github.com/carloswestman/voicepipe/archive/refs/tags/v0.2.1.tar.gz"
+  sha256 "151672d08fff13e19639f136d598ce43cd713528f49d7202e46e3f471514cd51"
   license "MIT"
   head "https://github.com/carloswestman/voicepipe.git", branch: "main"
 
