@@ -1,5 +1,7 @@
-// Package speak turns text into speech using the macOS `say` command — built in,
-// zero dependencies, which fits voicepipe's easy-install goal.
+// Package speak turns text into speech. The default backend is the macOS `say`
+// command — built in, zero dependencies, which fits voicepipe's easy-install
+// goal. An opt-in OpenAI-compatible backend (openai.go) adds nicer local (Kokoro)
+// or hosted voices behind the same Speaker interface.
 package speak
 
 import (

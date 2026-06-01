@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -34,7 +33,7 @@ const modelURL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml
 
 // version is the release version, overridable at build time via
 // -ldflags "-X main.version=…".
-var version = "0.2.1"
+var version = "0.3.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -402,33 +401,41 @@ func cmdTalk(ctx context.Context, args []string) error {
 		outMu.Unlock()
 	}
 
-	// Speech: serialize playback, mute the mic during it, allow Esc to kill it.
+	// TTS backend: `say` by default; switched to the OpenAI-compatible backend
+	// below once cctx exists (so a managed server shares the session lifecycle).
+	// say() captures this by reference and isn't called until the watcher starts.
+	var speaker speak.Speaker = speak.SaySpeaker{Opts: sopts}
+
+	// Speech: serialize playback, mute the mic during it, allow Esc to cancel it.
+	// Interruption is by context cancellation, which uniformly aborts `say`, the
+	// OpenAI backend's HTTP synth, and afplay.
 	var (
-		sayMu     sync.Mutex // guards activeSay
-		speakMu   sync.Mutex // serializes playback
-		activeSay *exec.Cmd
-		muted     atomic.Bool
-		skipRead  atomic.Bool // Esc: stop current read AND skip the backlog
+		cancelMu     sync.Mutex // guards activeCancel
+		speakMu      sync.Mutex // serializes playback
+		activeCancel context.CancelFunc
+		muted        atomic.Bool
+		skipRead     atomic.Bool // Esc: stop current read AND skip the backlog
 	)
 	stopSay := func() {
-		sayMu.Lock()
-		if activeSay != nil && activeSay.Process != nil {
-			_ = activeSay.Process.Kill()
+		cancelMu.Lock()
+		if activeCancel != nil {
+			activeCancel()
 		}
-		sayMu.Unlock()
+		cancelMu.Unlock()
 	}
 	say := func(text string) {
 		speakMu.Lock()
 		defer speakMu.Unlock()
 		muted.Store(true)
-		c := speak.Command(ctx, text, sopts)
-		sayMu.Lock()
-		activeSay = c
-		sayMu.Unlock()
-		_ = c.Run()
-		sayMu.Lock()
-		activeSay = nil
-		sayMu.Unlock()
+		callCtx, cancel := context.WithCancel(ctx)
+		cancelMu.Lock()
+		activeCancel = cancel
+		cancelMu.Unlock()
+		_ = speaker.Speak(callCtx, text)
+		cancelMu.Lock()
+		activeCancel = nil
+		cancelMu.Unlock()
+		cancel()
 		muted.Store(false)
 	}
 
@@ -456,6 +463,30 @@ func cmdTalk(ctx context.Context, args []string) error {
 		tr = srv
 	} else {
 		fmt.Fprintln(os.Stderr, ui.Dim("voicepipe: whisper-server unavailable ("+e.Error()+"); using slower per-utterance mode"))
+	}
+
+	// TTS backend. `say` is the default; "openai" speaks via an OpenAI-compatible
+	// server (local Kokoro or hosted). If a managed server is configured and the
+	// endpoint isn't already up, launch it for the session and stop it on exit.
+	// Any failure falls back to `say` so talk always speaks.
+	if cfg.TTS == "openai" {
+		osp := speak.NewOpenAISpeaker(speak.OpenAIOptions{
+			BaseURL: cfg.TTSBaseURL, APIKey: cfg.TTSApiKey,
+			Voice: voice, Model: cfg.TTSModel, Format: cfg.TTSFormat,
+		})
+		if cfg.TTSServerCmd != "" && osp.Reachable(cctx) != nil {
+			fmt.Fprintln(os.Stderr, ui.Dim("starting TTS server (first run downloads models, may take a few minutes)…"))
+			if srv, e := speak.StartServer(cctx, cfg.TTSServerCmd, osp.Reachable, 5*time.Minute); e == nil {
+				defer srv.Close()
+			} else {
+				fmt.Fprintln(os.Stderr, ui.Dim("voicepipe: TTS server unavailable ("+e.Error()+"); falling back to `say`"))
+			}
+		}
+		if osp.Reachable(cctx) == nil {
+			speaker = osp
+		} else {
+			fmt.Fprintln(os.Stderr, ui.Dim("voicepipe: TTS endpoint "+cfg.TTSBaseURL+" not reachable; using `say`"))
+		}
 	}
 
 	// Print the banner before starting any status-writing goroutine.
@@ -997,6 +1028,26 @@ func cmdDoctor() error {
 		if onPath("tmux") {
 			info("tmux available", "opt into per-pane routing with `voicepipe tmux-install`")
 		}
+	}
+
+	// Text-to-speech backend (used by `talk`).
+	ttsKind := cfg.TTS
+	if ttsKind == "" {
+		ttsKind = "say"
+	}
+	fmt.Printf("\n%s %s\n", ui.Dim("tts"), ui.Accent(ttsKind))
+	if ttsKind == "openai" {
+		required("afplay on PATH", onPath("afplay"), "afplay ships with macOS")
+		osp := speak.NewOpenAISpeaker(speak.OpenAIOptions{BaseURL: cfg.TTSBaseURL, APIKey: cfg.TTSApiKey, Model: cfg.TTSModel, Format: cfg.TTSFormat})
+		if osp.Reachable(context.Background()) == nil {
+			info("TTS endpoint reachable", cfg.TTSBaseURL)
+		} else if cfg.TTSServerCmd != "" {
+			info("TTS server managed by voicepipe", "launches on talk: "+cfg.TTSServerCmd)
+		} else {
+			required("TTS endpoint reachable", false, "start your TTS server at "+cfg.TTSBaseURL+", set tts_server_cmd, or use \"tts\":\"say\"")
+		}
+	} else {
+		required("`say` available", speak.Available(), "say ships with macOS")
 	}
 
 	if !ok {

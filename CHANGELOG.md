@@ -6,6 +6,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-31
+### Added
+- Pluggable TTS backend for `talk`: `tts: "say"` (default, built-in macOS speech —
+  zero setup) or `tts: "openai"`, which speaks through any OpenAI-compatible
+  `/audio/speech` server. The same setting drives a **local Kokoro server** (free,
+  fully offline, nicer voices) or a hosted provider (`tts_api_key`/`tts_base_url`);
+  `voice` becomes the backend voice id (e.g. `af_heart`). Synthesized audio is
+  played with `afplay`. Config: `tts`, `tts_base_url`, `tts_api_key`, `tts_model`,
+  `tts_format`, `tts_server_cmd`.
+- Optional managed TTS server: set `tts_server_cmd` and voicepipe launches a local
+  server for the session (only if the endpoint isn't already up) and stops it on
+  exit — mirroring the warm `whisper-server` lifecycle. Any failure falls back to
+  `say`, so `talk` always speaks. `voicepipe doctor` checks the TTS endpoint.
+
+### Changed
+- `talk` reply interruption (Esc) is now driven by context cancellation, which
+  uniformly aborts the macOS `say` process and the OpenAI backend's HTTP synthesis
+  plus `afplay` playback.
+
 ## [0.2.1] - 2026-05-31
 ### Changed
 - `talk` keeps whisper **warm** via `whisper-server` — the model loads once per
@@ -97,7 +116,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `--verbose` diagnostics: audio metrics and timing per utterance.
 - Configuration via `~/Library/Application Support/voicepipe/config.json`.
 
-[Unreleased]: https://github.com/carloswestman/voicepipe/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/carloswestman/voicepipe/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/carloswestman/voicepipe/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/carloswestman/voicepipe/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/carloswestman/voicepipe/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/carloswestman/voicepipe/releases/tag/v0.1.0

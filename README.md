@@ -135,9 +135,41 @@ the path). Highlights:
 | `agents` | `{}` | friendly name → tmux target (pane id or `session:window.pane`) |
 | `default_agent` | `""` | agent `talk` auto-connects to on start |
 | `focus_on_connect` | `true` | bring the agent's pane into view on connect |
-| `voice` / `speech_rate` | system | macOS `say` voice and words-per-minute for replies |
+| `voice` / `speech_rate` | system | reply voice: macOS `say` voice + words-per-minute (`tts: say`), or the backend voice id like `af_heart` (`tts: openai`) |
 | `silence_ms` | `1200` | trailing silence that ends an utterance |
 | `prompt` | tooling vocab | whisper initial prompt to fix proper nouns |
+| `tts` | `say` | speech backend: `say` (built in) or `openai` (Kokoro/hosted) |
+
+## Nicer voices (optional)
+
+Replies use the built-in macOS `say` by default — zero setup. If you want a more
+natural voice, voicepipe can speak through any **OpenAI-compatible** TTS server,
+so the same setting drives a **local [Kokoro](https://github.com/hexgrad/kokoro)
+server** (free, fully offline) or a hosted provider (`tts_api_key` + `tts_base_url`).
+
+Point it at a local Kokoro server — for example
+[Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI):
+
+```bash
+docker run -d -p 8880:8880 ghcr.io/remsky/kokoro-fastapi-cpu:latest
+```
+
+then set in your config:
+
+```json
+{
+  "tts": "openai",
+  "tts_base_url": "http://127.0.0.1:8880/v1",
+  "tts_model": "kokoro",
+  "voice": "af_heart"
+}
+```
+
+`voicepipe doctor` checks the endpoint is reachable. Want voicepipe to start the
+server for you and stop it on exit? Set `tts_server_cmd` to the launch command
+(e.g. a [macos-speech-server](https://github.com/dokterbob/macos-speech-server)
+binary that runs Kokoro on the Apple Neural Engine) — it's launched only if the
+endpoint isn't already up. If anything's unreachable, `talk` falls back to `say`.
 
 ## Commands
 

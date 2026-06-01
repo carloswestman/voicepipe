@@ -83,6 +83,32 @@ type Config struct {
 	// the voicepipe pane, so Esc-to-stop won't reach voicepipe until you click
 	// back. Default true.
 	FocusOnConnect bool `json:"focus_on_connect"`
+
+	// TTS selects the text-to-speech backend for `talk`: "say" (default) uses the
+	// built-in macOS `say` — zero setup, the friction-free path; "openai" speaks
+	// via an OpenAI-compatible /audio/speech server — a local Kokoro server for
+	// nicer offline voices, or a hosted provider. With "openai", the Voice field
+	// holds the backend's voice id (e.g. "af_heart").
+	TTS string `json:"tts"`
+
+	// TTSBaseURL is the OpenAI-compatible API base for the "openai" backend
+	// (e.g. "http://127.0.0.1:8880/v1" for a local Kokoro server).
+	TTSBaseURL string `json:"tts_base_url"`
+
+	// TTSApiKey authenticates a hosted TTS provider. Leave empty for a local server.
+	TTSApiKey string `json:"tts_api_key"`
+
+	// TTSModel is the model name sent to the TTS server (e.g. "kokoro", "tts-1").
+	TTSModel string `json:"tts_model"`
+
+	// TTSFormat is the audio format requested and played with afplay (mp3, wav, aac).
+	TTSFormat string `json:"tts_format"`
+
+	// TTSServerCmd, if set, is the command voicepipe runs to launch a local TTS
+	// server for the session (e.g. a speech-server binary path). voicepipe starts
+	// it only when the endpoint isn't already up and stops it on exit. Empty means
+	// you run the server yourself.
+	TTSServerCmd string `json:"tts_server_cmd"`
 }
 
 // Default returns the recommended out-of-the-box configuration.
@@ -100,6 +126,10 @@ func Default() Config {
 		CommandWord:    "computer",
 		Agents:         map[string]string{},
 		FocusOnConnect: true,
+		TTS:            "say", // built-in macOS speech; "openai" opts into Kokoro/hosted
+		TTSBaseURL:     "http://127.0.0.1:8880/v1",
+		TTSModel:       "kokoro",
+		TTSFormat:      "mp3",
 	}
 }
 
