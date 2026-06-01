@@ -26,18 +26,25 @@ editor, or app — when that's all you need.
 ## Install
 
 ```sh
-brew install go whisper-cpp tmux        # dependencies
-git clone https://github.com/carloswestman/voicepipe
-cd voicepipe
-go build -o voicepipe ./cmd/voicepipe
-sudo mv voicepipe /usr/local/bin/       # or anywhere on PATH
+brew install carloswestman/tap/voicepipe
 
 voicepipe init       # downloads the whisper model (~1.5 GB) and writes config
 voicepipe doctor     # confirm whisper-cpp, the model, and sinks are ready
 ```
 
-> macOS-focused (it uses CoreAudio + macOS text-to-speech). A Homebrew tap for a
-> one-line install is planned.
+macOS-focused (it uses CoreAudio + macOS text-to-speech). The formula pulls in
+`whisper-cpp` and `tmux` for you.
+
+<details>
+<summary>Build from source</summary>
+
+```sh
+brew install go whisper-cpp tmux
+git clone https://github.com/carloswestman/voicepipe
+cd voicepipe
+go build -o voicepipe ./cmd/voicepipe
+```
+</details>
 
 ## Quickstart — talk to your agents
 
