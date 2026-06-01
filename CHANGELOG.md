@@ -5,6 +5,12 @@ All notable changes to voicepipe are documented here. The format is based on
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Changed
+- `talk` keeps whisper **warm** via `whisper-server` — the model loads once per
+  session instead of reloading on every utterance, roughly halving transcription
+  latency (~3.5–4s → ~2s per turn on an M4). It warms up at start so the first
+  utterance is fast, and falls back to per-call `whisper-cli` if the server can't
+  start. (Diagnosed: the slowdown was per-call model reload, not GPU contention.)
 
 ## [0.2.0] - 2026-05-31
 ### Added

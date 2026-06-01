@@ -445,6 +445,19 @@ func cmdTalk(ctx context.Context, args []string) error {
 		return err
 	}
 
+	// Keep whisper warm for the session — the model loads once instead of on every
+	// utterance, roughly halving transcription latency. Falls back to per-call CLI
+	// if whisper-server can't start.
+	topts := transcribe.Options{WhisperBin: cfg.WhisperBin, ModelPath: cfg.ModelPath, Language: cfg.Language, Prompt: cfg.Prompt}
+	var tr transcribe.Transcriber = transcribe.CLI{Opts: topts}
+	fmt.Fprintln(os.Stderr, ui.Dim("loading whisper…"))
+	if srv, e := transcribe.StartServer(cctx, topts); e == nil {
+		defer srv.Close()
+		tr = srv
+	} else {
+		fmt.Fprintln(os.Stderr, ui.Dim("voicepipe: whisper-server unavailable ("+e.Error()+"); using slower per-utterance mode"))
+	}
+
 	// Print the banner before starting any status-writing goroutine.
 	talkBanner(agentLabel, target, wake, cfg.Agents)
 
@@ -585,7 +598,7 @@ func cmdTalk(ctx context.Context, args []string) error {
 				return nil
 			}
 		}
-		text, terr := transcribeSamples(cctx, cfg, samples)
+		text, terr := transcribeSamples(cctx, samples, tr)
 		if terr != nil {
 			if cctx.Err() == nil {
 				printLine("voicepipe: " + terr.Error())
@@ -677,19 +690,15 @@ func cmdTalk(ctx context.Context, args []string) error {
 	}
 }
 
-// transcribeSamples writes the utterance to a temp WAV and transcribes it.
-func transcribeSamples(ctx context.Context, cfg config.Config, samples []int16) (string, error) {
+// transcribeSamples writes the utterance to a temp WAV and transcribes it with
+// the given transcriber (warm server in talk, or CLI fallback).
+func transcribeSamples(ctx context.Context, samples []int16, tr transcribe.Transcriber) (string, error) {
 	wav := filepath.Join(os.TempDir(), "voicepipe-talk.wav")
 	if err := audio.WriteWAV(wav, samples); err != nil {
 		return "", err
 	}
 	defer os.Remove(wav)
-	return transcribe.FromWAV(ctx, wav, transcribe.Options{
-		WhisperBin: cfg.WhisperBin,
-		ModelPath:  cfg.ModelPath,
-		Language:   cfg.Language,
-		Prompt:     cfg.Prompt,
-	})
+	return tr.Transcribe(ctx, wav)
 }
 
 // resolveAgent maps a spoken name to a pane id: registry first, then a tmux
