@@ -18,6 +18,31 @@ func TestReplyExtraction(t *testing.T) {
 	}
 }
 
+func TestNewSpeech(t *testing.T) {
+	full := "Understood, take the time you need. The patched binary is ready."
+	partial := "Understood, take the time you need."
+
+	// A block read as a partial, then again after it grew: only the new tail.
+	if got := NewSpeech(full, []string{partial}); got != "The patched binary is ready." {
+		t.Errorf("grown block tail = %q", got)
+	}
+	// Fully-spoken block (exact, and whitespace/case variant) → nothing new.
+	if got := NewSpeech(partial, []string{partial}); got != "" {
+		t.Errorf("exact repeat = %q, want empty", got)
+	}
+	if got := NewSpeech("the build passes  and ALL tests pass.", []string{"The build passes and all tests pass."}); got != "" {
+		t.Errorf("reflow/case variant = %q, want empty", got)
+	}
+	// A genuinely new block (no shared prefix) is spoken in full.
+	if got := NewSpeech("A different sentence.", []string{partial}); got != "A different sentence." {
+		t.Errorf("distinct block = %q", got)
+	}
+	// Nothing spoken yet → speak it all (whitespace normalized to single spaces).
+	if got := NewSpeech("Hello   there.", nil); got != "Hello there." {
+		t.Errorf("first read = %q", got)
+	}
+}
+
 func TestFilterDropsMechanics(t *testing.T) {
 	// Real lines captured from a Claude Code pane: keep the prose, drop the
 	// tool calls, diffs, results, and command output.

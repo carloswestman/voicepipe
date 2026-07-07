@@ -90,6 +90,11 @@ wake word (default **`computer`**, configurable). Commands:
 | `help` | read the command list |
 | `quit` | exit talk |
 
+**Noisy room?** Start with `voicepipe talk --ptt` (or set `push_to_talk: true`) for
+push-to-talk: the mic stays closed until you press **space** to toggle it on, and
+again to mute — so café chatter and background noise don't keep firing the
+recognizer. The status line shows `muted · space to talk` when it's closed.
+
 You can **keep talking while the agent works** — messages queue into it like typed
 input. Press **Esc** in the voicepipe pane to stop a reply that's reading and skip
 the rest.

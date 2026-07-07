@@ -84,6 +84,12 @@ type Config struct {
 	// back. Default true.
 	FocusOnConnect bool `json:"focus_on_connect"`
 
+	// PushToTalk starts `talk` with the mic closed; press space to toggle it open
+	// (and closed again). Useful in noisy rooms so ambient sound doesn't keep
+	// firing the recognizer. Default false (listen continuously). The `--ptt` flag
+	// turns it on for a single run.
+	PushToTalk bool `json:"push_to_talk"`
+
 	// TTS selects the text-to-speech backend for `talk`: "say" (default) uses the
 	// built-in macOS `say` — zero setup, the friction-free path; "openai" speaks
 	// via an OpenAI-compatible /audio/speech server — a local Kokoro server for
@@ -136,6 +142,12 @@ func Default() Config {
 // Path is the on-disk location of the config file.
 func Path() string {
 	return filepath.Join(configDir(), "config.json")
+}
+
+// LogPath is where `talk` writes its per-session diagnostic log (overwritten
+// each run) — used to troubleshoot the reply reader after the fact.
+func LogPath() string {
+	return filepath.Join(configDir(), "talk.log")
 }
 
 // Load reads the config file, falling back to defaults for any missing fields.
