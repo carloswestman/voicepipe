@@ -356,6 +356,43 @@ func normalizeWS(s string) string {
 	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
 }
 
+// NewSpeech returns the part of prose that hasn't been spoken yet, matched at
+// word granularity and case-insensitively against the already-spoken strings.
+// When a block is read while still streaming and then again after it grew, the
+// earlier (shorter) read is a word-prefix of the later one, so only the new tail
+// comes back — the reply reader never repeats text it already voiced. It also
+// absorbs whitespace/case/reflow variants (Fields + EqualFold). Returns "" when
+// prose is fully covered.
+func NewSpeech(prose string, spoken []string) string {
+	pw := strings.Fields(prose)
+	if len(pw) == 0 {
+		return ""
+	}
+	longest := 0 // count of leading words already spoken
+	for _, s := range spoken {
+		sw := strings.Fields(s)
+		if len(sw) > longest && len(sw) <= len(pw) && wordsEqualFold(pw[:len(sw)], sw) {
+			longest = len(sw)
+		}
+	}
+	if longest >= len(pw) {
+		return ""
+	}
+	return strings.Join(pw[longest:], " ")
+}
+
+func wordsEqualFold(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !strings.EqualFold(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 // sanitizeForSpeech strips characters that text-to-speech would awkwardly name —
 // the leading ● / ⏺ response marker, backticks, asterisks, box drawing, arrows,
 // emoji — keeping letters, numbers, and basic punctuation so `say` reads clean

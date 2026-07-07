@@ -92,11 +92,14 @@ usage:
                                  (auto-submits each utterance; --no-send to disable;
                                   same sink flags as capture; Ctrl-C to stop)
             [--verbose | -v]      (capture/listen) log audio metrics + timing per utterance
-  voicepipe talk [--pane P]      two-way: speak to an agent (pane P, default active),
-                                 hear its reply read aloud (--voice NAME, --rate WPM)
-                                 (--pane and --target are aliases; P from "voicepipe panes")
-                                 in-session voice commands: say "computer help" (connect,
-                                 agents, status, pause, resume, send, quit; word configurable)
+  voicepipe talk [--pane P]      two-way: speak to an agent, hear its reply read aloud
+            [--ptt]              push-to-talk: mic starts closed; press space to toggle it
+            [--voice NAME]       speech voice (a say voice, or a backend id like af_heart)
+            [--rate WPM]         speaking rate for the say backend
+            [--verbose | -v]     echo the reply-reader trace to the screen
+                                 (--pane/--target are aliases; P from "voicepipe panes".
+                                  in session, say "computer help": connect, agents, status,
+                                  pause, resume, send, quit — wake word configurable)
   voicepipe type <text>          type given text via the keystroke sink (test typing)
   voicepipe panes                list tmux panes (find a --target for talk)
   voicepipe agents               list configured agents and whether each is alive
@@ -276,6 +279,7 @@ func cmdTalk(ctx context.Context, args []string) error {
 	voice := cfg.Voice
 	rate := cfg.SpeechRate
 	verbose := hasFlag(args, "--verbose", "-v")
+	ptt := hasFlag(args, "--ptt")
 	for i := 0; i < len(args); i++ {
 		switch a := args[i]; a {
 		case "--target", "--pane", "-t":
@@ -295,8 +299,8 @@ func cmdTalk(ctx context.Context, args []string) error {
 				}
 				i++
 			}
-		case "--verbose", "-v":
-			// captured via hasFlag above; accept so it isn't treated as unknown
+		case "--verbose", "-v", "--ptt":
+			// captured via hasFlag above; accept so they aren't treated as unknown
 		default:
 			// Surface typos loudly instead of silently misfiring. A bare value is
 			// accepted as the target (e.g. `talk dev:whisper.0`).
@@ -307,6 +311,19 @@ func cmdTalk(ctx context.Context, args []string) error {
 				return fmt.Errorf("unexpected argument: %s", a)
 			}
 			target = a
+		}
+	}
+
+	// Session log — always written so reply-reader issues can be diagnosed from a
+	// file afterwards (verbose only echoes to the screen). Overwritten each run.
+	logLine := func(string, ...any) {}
+	if lf, e := os.Create(config.LogPath()); e == nil {
+		defer lf.Close()
+		var logMu sync.Mutex
+		logLine = func(format string, a ...any) {
+			logMu.Lock()
+			fmt.Fprintf(lf, time.Now().Format("15:04:05.000 ")+format+"\n", a...)
+			logMu.Unlock()
 		}
 	}
 
@@ -337,10 +354,22 @@ func cmdTalk(ctx context.Context, args []string) error {
 	// Bias whisper toward the wake word, command verbs, and agent names.
 	cfg.Prompt = talkPrompt(cfg)
 
+	// Push-to-talk: when on, the mic stays closed until you press space (toggle),
+	// so noisy rooms don't keep firing. listening=true means the mic is open;
+	// without PTT it's always open (the original continuous behavior).
+	pttMode := ptt || cfg.PushToTalk
+	var listening atomic.Bool
+	listening.Store(!pttMode)
+
 	interactive := false
 	if restore, ok := enterCbreak(); ok {
 		defer restore()
 		interactive = true
+	}
+	if pttMode && !interactive {
+		fmt.Fprintln(os.Stderr, "voicepipe: push-to-talk needs a TTY; listening continuously instead")
+		pttMode = false
+		listening.Store(true)
 	}
 
 	// Shared connection state and recent sends (echo filtering), guarded by stMu.
@@ -387,10 +416,15 @@ func cmdTalk(ctx context.Context, args []string) error {
 			style, label = ui.Dim, "thinking…"
 		case "speaking":
 			style, label = ui.Dim, "speaking…"
+		default: // "listening": in PTT the mic is closed until you press space
+			if pttMode && !listening.Load() {
+				style, label = ui.Dim, "muted · space to talk"
+			}
 		}
 		fmt.Fprintf(os.Stderr, "\r\x1b[K%s", style(frames[throbFrame%len(frames)]+" "+label))
 	}
 	setState := func(st string) { outMu.Lock(); stState = st; renderLocked(); outMu.Unlock() }
+	rerender := func() { outMu.Lock(); renderLocked(); outMu.Unlock() }
 	printLine := func(s string) {
 		outMu.Lock()
 		if interactive && !verbose {
@@ -414,8 +448,13 @@ func cmdTalk(ctx context.Context, args []string) error {
 		speakMu      sync.Mutex // serializes playback
 		activeCancel context.CancelFunc
 		muted        atomic.Bool
+		playing      atomic.Bool // true while a reply is being spoken
 		skipRead     atomic.Bool // Esc: stop current read AND skip the backlog
 	)
+	// The mic is gated shut while a reply plays (echo guard) OR, in push-to-talk
+	// mode, whenever the mic is toggled off. applyMute folds both into one flag.
+	applyMute := func() { muted.Store(playing.Load() || !listening.Load()) }
+	applyMute() // set the initial gate before the stream opens (PTT starts muted)
 	stopSay := func() {
 		cancelMu.Lock()
 		if activeCancel != nil {
@@ -426,7 +465,8 @@ func cmdTalk(ctx context.Context, args []string) error {
 	say := func(text string) {
 		speakMu.Lock()
 		defer speakMu.Unlock()
-		muted.Store(true)
+		playing.Store(true)
+		applyMute()
 		callCtx, cancel := context.WithCancel(ctx)
 		cancelMu.Lock()
 		activeCancel = cancel
@@ -436,7 +476,8 @@ func cmdTalk(ctx context.Context, args []string) error {
 		activeCancel = nil
 		cancelMu.Unlock()
 		cancel()
-		muted.Store(false)
+		playing.Store(false)
+		applyMute()
 	}
 
 	// Persistent mic stream — open once, muted during playback. cctx lets `quit`
@@ -469,6 +510,13 @@ func cmdTalk(ctx context.Context, args []string) error {
 	// server (local Kokoro or hosted). If a managed server is configured and the
 	// endpoint isn't already up, launch it for the session and stop it on exit.
 	// Any failure falls back to `say` so talk always speaks.
+	// voiceLine announces which voice backend is live, so it's never a mystery
+	// whether you're hearing Kokoro/a server or the built-in `say`.
+	sayVoice := voice
+	if sayVoice == "" {
+		sayVoice = "system default"
+	}
+	voiceLine := ui.Dim("voice: ") + ui.Accent("say · "+sayVoice)
 	if cfg.TTS == "openai" {
 		osp := speak.NewOpenAISpeaker(speak.OpenAIOptions{
 			BaseURL: cfg.TTSBaseURL, APIKey: cfg.TTSApiKey,
@@ -484,26 +532,48 @@ func cmdTalk(ctx context.Context, args []string) error {
 		}
 		if osp.Reachable(cctx) == nil {
 			speaker = osp
+			model := cfg.TTSModel
+			if model == "" {
+				model = "openai"
+			}
+			voiceLine = ui.Dim("voice: ") + ui.Accent(model+" · "+voice) + ui.Dim(" ("+cfg.TTSBaseURL+")")
 		} else {
 			fmt.Fprintln(os.Stderr, ui.Dim("voicepipe: TTS endpoint "+cfg.TTSBaseURL+" not reachable; using `say`"))
 		}
 	}
+	fmt.Fprintln(os.Stderr, voiceLine)
+	fmt.Fprintln(os.Stderr, ui.Dim("log: "+config.LogPath()))
+	logLine("talk start: tts=%s voice=%q target=%q ptt=%v", cfg.TTS, voice, target, pttMode)
 
 	// Print the banner before starting any status-writing goroutine.
 	talkBanner(agentLabel, target, wake, cfg.Agents)
 
 	if interactive {
-		fmt.Fprintln(os.Stderr, "  "+ui.Dim("speak any time — input queues while the agent works; Esc stops a reply"))
-		go func() { // Esc-to-stop reader
+		if pttMode {
+			fmt.Fprintln(os.Stderr, "  "+ui.Dim("push-to-talk: press space to toggle the mic on/off; Esc stops a reply"))
+		} else {
+			fmt.Fprintln(os.Stderr, "  "+ui.Dim("speak any time — input queues while the agent works; Esc stops a reply"))
+		}
+		go func() { // key reader: Esc stops a reply; space toggles the mic in PTT mode
 			buf := make([]byte, 1)
 			for {
 				n, e := os.Stdin.Read(buf)
 				if e != nil {
 					return
 				}
-				if n > 0 && buf[0] == 0x1b {
+				if n == 0 {
+					continue
+				}
+				switch buf[0] {
+				case 0x1b: // Esc
 					stopSay()
 					skipRead.Store(true) // also drop any queued/backlogged reads
+				case ' ': // space — push-to-talk toggle
+					if pttMode {
+						listening.Store(!listening.Load())
+						applyMute()
+						rerender()
+					}
 				}
 			}
 		}()
@@ -536,16 +606,14 @@ func cmdTalk(ctx context.Context, args []string) error {
 	go func() {
 		const poll = 150 * time.Millisecond
 		const settle = 700 * time.Millisecond
-		spoken := map[string]bool{}
-		var order []string
+		// Already-voiced prose, in order (bounded). A block read while still
+		// streaming and then again after it grew is a word-prefix of the later
+		// read, so tmuxpane.NewSpeech returns only the new tail — never a repeat.
+		var spokenRaw []string
 		markSpoken := func(p string) {
-			if !spoken[p] {
-				spoken[p] = true
-				order = append(order, p)
-				if len(order) > 200 { // bound the memory
-					delete(spoken, order[0])
-					order = order[1:]
-				}
+			spokenRaw = append(spokenRaw, p)
+			if len(spokenRaw) > 200 { // bound the memory
+				spokenRaw = spokenRaw[len(spokenRaw)-200:]
 			}
 		}
 		// markAll marks every current prose block read — used on connect and Esc so
@@ -559,6 +627,7 @@ func cmdTalk(ctx context.Context, args []string) error {
 		}
 		var prevVisible string
 		var lastChange time.Time
+		var lastDump string // last capture logged as a parse trail (dedup)
 		for {
 			select {
 			case <-cctx.Done():
@@ -586,22 +655,52 @@ func cmdTalk(ctx context.Context, args []string) error {
 			working := tmuxpane.Working(visible)
 			settled := !working && time.Since(lastChange) >= settle
 
-			blocks := tmuxpane.Blocks(tmuxpane.CaptureFull(cctx, t))
+			capture := tmuxpane.CaptureFull(cctx, t)
+			blocks := tmuxpane.Blocks(capture)
+			// Once per settled reply, log the full received→parsed trail: each block's
+			// raw text and what the parser kept/dropped. This makes the log
+			// self-contained for debugging parsing regressions — no need to copy the
+			// Claude screen. (Gated on settle+change so it stays readable.)
+			dump := settled && capture != lastDump
+			if dump {
+				lastDump = capture
+				logLine("=== parse trail: %d blocks (settled) ===", len(blocks))
+			}
 			for i, b := range blocks {
 				prose := tmuxpane.CleanBlock(b, getSent())
-				if prose == "" || spoken[prose] {
-					continue // machinery, or already read
+				if dump {
+					raw := logHead(strings.Join(b, " ⏎ "), 1600)
+					if prose == "" {
+						logLine("  block[%d] DROP raw=%q", i, raw)
+					} else {
+						logLine("  block[%d] KEEP raw=%q", i, raw)
+						logLine("           parsed=%q", logHead(prose, 1600))
+					}
+				}
+				if prose == "" {
+					continue // machinery
 				}
 				if i == len(blocks)-1 && !settled {
 					break // final block is still streaming — wait for it
 				}
-				markSpoken(prose)
-				if verbose {
-					fmt.Fprintf(os.Stderr, "[watch] reading block (%d chars)\n", len(prose))
+				// Speak only what's new: if this block was read earlier as a
+				// shorter partial, NewSpeech returns just the grown tail.
+				delta := tmuxpane.NewSpeech(prose, spokenRaw)
+				if delta == "" {
+					if dump {
+						logLine("  block[%d] SKIP output (already spoken)", i)
+					}
+					continue // already fully spoken — do NOT re-record (was evicting history)
 				}
-				printLine("  " + ui.Green("←") + " " + ui.Green(label+":") + " " + prose)
+				markSpoken(prose) // only record once we actually speak it
+				logLine("SPEAK block[%d] (prose=%dch delta=%dch spoken=%d) output=%q",
+					i, len(prose), len(delta), len(spokenRaw), logHead(delta, 1600))
+				if verbose {
+					fmt.Fprintf(os.Stderr, "[watch] reading block (%d chars, %d new)\n", len(prose), len(delta))
+				}
+				printLine("  " + ui.Green("←") + " " + ui.Green(label+":") + " " + delta)
 				setState("speaking")
-				say(prose)
+				say(delta)
 			}
 			if working {
 				setState("thinking")
@@ -1071,6 +1170,16 @@ func cmdTmuxInstall() error {
   bind V run-shell -b "%s capture --send --target '#{pane_id}'"
 `, bin, bin)
 	return nil
+}
+
+// logHead returns the first n runes of s on a single line (whitespace collapsed),
+// with an ellipsis if truncated — for compact, single-line diagnostic log entries.
+func logHead(s string, n int) string {
+	r := []rune(strings.Join(strings.Fields(s), " "))
+	if len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return string(r)
 }
 
 func onPath(name string) bool {

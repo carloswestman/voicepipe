@@ -5,6 +5,31 @@ All notable changes to voicepipe are documented here. The format is based on
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- Push-to-talk for `talk` (`--ptt` flag or `push_to_talk` config): starts with the
+  mic closed and toggles it open/closed with the space bar, so a noisy room doesn't
+  keep firing the recognizer. The status line shows `muted · space to talk` when
+  closed. Falls back to continuous listening when stdin isn't a TTY.
+- `talk` writes a per-session diagnostic log to `talk.log` in the config dir
+  (overwritten each run). For each settled reply it records the full
+  received→parsed→output trail — every block's raw pane text, whether the parser
+  kept or dropped it, and what was spoken — so reply-reader issues can be diagnosed
+  from the log alone, without copying the terminal.
+
+### Changed
+- `talk` prints a `voice:` line on startup showing the active speech backend —
+  e.g. `voice: kokoro · af_heart (http://127.0.0.1:8080/v1)` or `voice: say · Ava`
+  — so it's clear whether you're hearing a TTS server or the built-in `say`.
+- `voicepipe help` lists the `talk` flags individually (including the new `--ptt`)
+  instead of burying them in prose, for easier scanning.
+
+### Fixed
+- `talk` no longer repeats the start of a reply. If the reader spoke a block while
+  it was still streaming and the block then grew, it would speak the whole thing
+  again. The reader now tracks voiced text at word granularity and speaks only the
+  new tail of a grown block, and no longer re-records already-spoken blocks on every
+  poll (which could evict its own dedup history) — so a long reply streams in pieces
+  instead of re-reading what you already heard (also absorbs whitespace/case/reflow).
 
 ## [0.3.0] - 2026-05-31
 ### Added
